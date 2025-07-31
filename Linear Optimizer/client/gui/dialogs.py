@@ -202,31 +202,31 @@ class OptimizationSettingsDialog(QDialog):
         # Форма настроек
         form_layout = QFormLayout()
         
-        # Минимальная длина остатка
-        self.min_remainder_length = QSpinBox()
-        self.min_remainder_length.setRange(10, 10000)
-        self.min_remainder_length.setSuffix(" мм")
-        form_layout.addRow("Мин. длина остатка:", self.min_remainder_length)
-        
-        # Толщина пропила
+        # Ширина распила
         self.blade_width = QSpinBox()
         self.blade_width.setRange(1, 20)
         self.blade_width.setSuffix(" мм")
-        form_layout.addRow("Толщина пропила:", self.blade_width)
+        form_layout.addRow("Ширина распила:", self.blade_width)
+        
+        # Минимальный остаток
+        self.min_remainder_length = QSpinBox()
+        self.min_remainder_length.setRange(10, 10000)
+        self.min_remainder_length.setSuffix(" мм")
+        form_layout.addRow("Минимальный остаток:", self.min_remainder_length)
         
         # Максимальный отход
         self.max_waste_percent = QSpinBox()
         self.max_waste_percent.setRange(1, 50)
         self.max_waste_percent.setSuffix(" %")
-        form_layout.addRow("Макс. процент отходов:", self.max_waste_percent)
+        form_layout.addRow("Максимальный отход:", self.max_waste_percent)
         
-        # Использование остатков
-        self.use_remainders = QCheckBox("Использовать остатки со склада")
+        # Парная оптимизация
+        self.pair_optimization = QCheckBox("Парная оптимизация")
+        form_layout.addRow(self.pair_optimization)
+        
+        # Использование склада остатков
+        self.use_remainders = QCheckBox("Использовать склад остатков")
         form_layout.addRow(self.use_remainders)
-        
-        # Оптимизировать порядок
-        self.optimize_order = QCheckBox("Оптимизировать порядок распила")
-        form_layout.addRow(self.optimize_order)
         
         layout.addLayout(form_layout)
         
@@ -250,28 +250,28 @@ class OptimizationSettingsDialog(QDialog):
 
     def load_settings(self):
         """Загрузка текущих настроек"""
+        self.blade_width.setValue(self.current_settings.get('blade_width', 5))
         self.min_remainder_length.setValue(self.current_settings.get('min_remainder_length', 300))
-        self.blade_width.setValue(self.current_settings.get('blade_width', 3))
         self.max_waste_percent.setValue(self.current_settings.get('max_waste_percent', 15))
+        self.pair_optimization.setChecked(self.current_settings.get('pair_optimization', True))
         self.use_remainders.setChecked(self.current_settings.get('use_remainders', True))
-        self.optimize_order.setChecked(self.current_settings.get('optimize_order', True))
 
     def reset_defaults(self):
         """Сброс к значениям по умолчанию"""
-        self.min_remainder_length.setValue(300)
-        self.blade_width.setValue(3)
+        self.blade_width.setValue(5)  # По умолчанию 5
+        self.min_remainder_length.setValue(300)  # По умолчанию 300
         self.max_waste_percent.setValue(15)
-        self.use_remainders.setChecked(True)
-        self.optimize_order.setChecked(True)
+        self.pair_optimization.setChecked(True)  # По умолчанию да
+        self.use_remainders.setChecked(True)  # По умолчанию да
 
     def get_settings(self):
         """Получение настроек"""
         return {
-            'min_remainder_length': self.min_remainder_length.value(),
             'blade_width': self.blade_width.value(),
+            'min_remainder_length': self.min_remainder_length.value(),
             'max_waste_percent': self.max_waste_percent.value(),
-            'use_remainders': self.use_remainders.isChecked(),
-            'optimize_order': self.optimize_order.isChecked()
+            'pair_optimization': self.pair_optimization.isChecked(),
+            'use_remainders': self.use_remainders.isChecked()
         }
 
 

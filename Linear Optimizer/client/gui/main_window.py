@@ -336,37 +336,37 @@ class LinearOptimizerWindow(QMainWindow):
         params_group = QGroupBox("Параметры оптимизации")
         layout = QFormLayout()
         
-        # Минимальная длина остатка
-        self.min_remainder_length = QSpinBox()
-        self.min_remainder_length.setRange(10, 10000)
-        self.min_remainder_length.setValue(300)
-        self.min_remainder_length.setSuffix(" мм")
-        layout.addRow("Мин. длина остатка:", self.min_remainder_length)
-        
-        # Толщина пропила
+        # Ширина распила
         self.blade_width = QSpinBox()
         self.blade_width.setRange(1, 20)
-        self.blade_width.setValue(3)
+        self.blade_width.setValue(5)  # По умолчанию 5
         self.blade_width.setSuffix(" мм")
-        layout.addRow("Толщина пропила:", self.blade_width)
+        layout.addRow("Ширина распила:", self.blade_width)
         
-        # Максимальный процент отходов
+        # Минимальный остаток
+        self.min_remainder_length = QSpinBox()
+        self.min_remainder_length.setRange(10, 10000)
+        self.min_remainder_length.setValue(300)  # По умолчанию 300
+        self.min_remainder_length.setSuffix(" мм")
+        layout.addRow("Минимальный остаток:", self.min_remainder_length)
+        
+        # Максимальный отход
         self.max_waste_percent = QSpinBox()
         self.max_waste_percent.setRange(1, 50)
         self.max_waste_percent.setValue(15)
         self.max_waste_percent.setSuffix(" %")
         self.max_waste_percent.setStyleSheet(WIDGET_CONFIGS["target_waste_percent"])
-        layout.addRow("🎯 Макс. % отходов:", self.max_waste_percent)
+        layout.addRow("🎯 Максимальный отход:", self.max_waste_percent)
         
-        # Использование остатков
-        self.use_remainders = QCheckBox("Использовать остатки со склада")
-        self.use_remainders.setChecked(True)
+        # Парная оптимизация
+        self.pair_optimization = QCheckBox("Парная оптимизация")
+        self.pair_optimization.setChecked(True)  # По умолчанию да
+        layout.addRow(self.pair_optimization)
+        
+        # Использование склада остатков
+        self.use_remainders = QCheckBox("Использовать склад остатков")
+        self.use_remainders.setChecked(True)  # По умолчанию да
         layout.addRow(self.use_remainders)
-        
-        # Оптимизация порядка
-        self.optimize_order = QCheckBox("Оптимизировать порядок распила")
-        self.optimize_order.setChecked(True)
-        layout.addRow(self.optimize_order)
         
         # Кнопки на одном уровне
         buttons_layout = QHBoxLayout()
@@ -563,11 +563,11 @@ class LinearOptimizerWindow(QMainWindow):
         self.progress_dialog.show()
         
         # Собираем параметры оптимизации
-        self.current_settings.min_remainder_length = self.min_remainder_length.value()
         self.current_settings.blade_width = self.blade_width.value()
+        self.current_settings.min_remainder_length = self.min_remainder_length.value()
         self.current_settings.max_waste_percent = self.max_waste_percent.value()
+        self.current_settings.pair_optimization = self.pair_optimization.isChecked()
         self.current_settings.use_remainders = self.use_remainders.isChecked()
-        self.current_settings.optimize_order = self.optimize_order.isChecked()
         
         # Запускаем оптимизацию в отдельном потоке
         def run_optimization():
@@ -639,11 +639,11 @@ class LinearOptimizerWindow(QMainWindow):
         """Сохранение текущих параметров оптимизации"""
         # Здесь можно реализовать сохранение настроек в файл
         settings = {
-            'min_remainder_length': self.min_remainder_length.value(),
             'blade_width': self.blade_width.value(),
+            'min_remainder_length': self.min_remainder_length.value(),
             'max_waste_percent': self.max_waste_percent.value(),
-            'use_remainders': self.use_remainders.isChecked(),
-            'optimize_order': self.optimize_order.isChecked()
+            'pair_optimization': self.pair_optimization.isChecked(),
+            'use_remainders': self.use_remainders.isChecked()
         }
         
         # TODO: Сохранить в файл настроек
@@ -778,11 +778,11 @@ class LinearOptimizerWindow(QMainWindow):
     def show_optimization_settings(self):
         """Показать настройки оптимизации"""
         current_settings = {
-            'min_remainder_length': self.min_remainder_length.value(),
             'blade_width': self.blade_width.value(),
+            'min_remainder_length': self.min_remainder_length.value(),
             'max_waste_percent': self.max_waste_percent.value(),
-            'use_remainders': self.use_remainders.isChecked(),
-            'optimize_order': self.optimize_order.isChecked()
+            'pair_optimization': self.pair_optimization.isChecked(),
+            'use_remainders': self.use_remainders.isChecked()
         }
         
         dialog = OptimizationSettingsDialog(self, current_settings)
@@ -790,11 +790,11 @@ class LinearOptimizerWindow(QMainWindow):
             settings = dialog.get_settings()
             
             # Применяем новые настройки
-            self.min_remainder_length.setValue(settings['min_remainder_length'])
             self.blade_width.setValue(settings['blade_width'])
+            self.min_remainder_length.setValue(settings['min_remainder_length'])
             self.max_waste_percent.setValue(settings['max_waste_percent'])
+            self.pair_optimization.setChecked(settings['pair_optimization'])
             self.use_remainders.setChecked(settings['use_remainders'])
-            self.optimize_order.setChecked(settings['optimize_order'])
     
     def show_api_settings(self):
         """Показать настройки API"""

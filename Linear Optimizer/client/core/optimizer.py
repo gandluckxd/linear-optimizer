@@ -9,10 +9,11 @@ from core.models import Profile, Stock, CutPlan, OptimizationResult
 @dataclass
 class OptimizationSettings:
     """Настройки оптимизации"""
-    blade_width: float = 3.0  # Ширина пропила в мм (совместимость с GUI)
-    min_remainder_length: float = 300.0  # Минимальная длина остатка в мм
-    max_waste_percent: float = 15.0  # Максимальный процент отходов
-    use_remainders: bool = True  # Использовать остатки со склада
+    blade_width: float = 5.0  # Ширина распила в мм (по умолчанию 5)
+    min_remainder_length: float = 300.0  # Минимальный остаток в мм (по умолчанию 300)
+    max_waste_percent: float = 15.0  # Максимальный отход в процентах
+    use_remainders: bool = True  # Использовать склад остатков (по умолчанию да)
+    pair_optimization: bool = True  # Парная оптимизация (по умолчанию да)
     optimize_order: bool = True  # Оптимизировать порядок распила
     
     # Для обратной совместимости
