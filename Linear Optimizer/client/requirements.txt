@@ -1,0 +1,6 @@
+# Linear Optimizer Client Dependencies
+# Для PyQt5 десктопного приложения
+
+PyQt5==5.15.10
+requests==2.31.0
+pyinstaller==6.14.2 

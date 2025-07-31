@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# PyQt
+*.ui.autosave
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PyInstaller
+*.spec
+*.exe
+*.dll
+
+# Database
+*.db
+*.fdb
+*.gdb
+*.sqlite
+*.sqlite3
+
+# FastAPI / uvicorn
+*.pid
+instance/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# Project specific
+user_settings.json
+optimization_results/
+temp/
+uploads/
+downloads/
+cache/ 

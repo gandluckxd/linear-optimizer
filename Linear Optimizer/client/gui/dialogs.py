@@ -1,0 +1,369 @@
+"""
+Диалоги для Linear Optimizer
+Адаптировано из Glass Optimizer
+"""
+
+from PyQt5.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, 
+    QPushButton, QProgressBar, QApplication, QMessageBox,
+    QFormLayout, QSpinBox, QCheckBox, QLineEdit
+)
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QFont
+from datetime import datetime
+from .config import DIALOG_STYLE
+
+
+class DebugDialog(QDialog):
+    """Диалог отладки загрузки данных"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Отладка загрузки данных")
+        self.setModal(False)  # Не модальный, чтобы можно было видеть консоль
+        self.setMinimumSize(600, 500)
+        
+        # Центрирование относительно родительского окна
+        if parent:
+            parent_geo = parent.geometry()
+            x = parent_geo.x() + (parent_geo.width() - 600) // 2
+            y = parent_geo.y() + (parent_geo.height() - 500) // 2
+            self.setGeometry(x, y, 600, 500)
+        
+        # Применение темной темы
+        self.setStyleSheet(DIALOG_STYLE)
+        
+        self.init_ui()
+        
+        # Начальное сообщение
+        self.add_step("🚀 Инициализация загрузки данных...")
+        
+        print("🔧 DEBUG: Диалог отладки инициализирован")
+
+    def init_ui(self):
+        """Инициализация интерфейса"""
+        layout = QVBoxLayout()
+        
+        # Заголовок
+        title_label = QLabel("Отладка загрузки данных API")
+        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+        
+        # Область текста
+        self.text_area = QTextEdit()
+        self.text_area.setReadOnly(True)
+        self.text_area.setFont(QFont("Consolas", 9))
+        layout.addWidget(self.text_area)
+        
+        # Кнопки
+        button_layout = QHBoxLayout()
+        
+        self.close_btn = QPushButton("Закрыть")
+        self.close_btn.clicked.connect(self.close)
+        button_layout.addWidget(self.close_btn)
+        
+        self.clear_btn = QPushButton("Очистить")
+        self.clear_btn.clicked.connect(self.clear_log)
+        button_layout.addWidget(self.clear_btn)
+        
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+
+    def add_step(self, message):
+        """Добавление шага в лог"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        formatted_message = f"[{timestamp}] {message}"
+        
+        self.text_area.append(formatted_message)
+        self.text_area.verticalScrollBar().setValue(
+            self.text_area.verticalScrollBar().maximum()
+        )
+        
+        # Принудительная обработка событий для обновления интерфейса
+        QApplication.processEvents()
+        
+        print(f"🔧 DEBUG: {formatted_message}")
+
+    def add_success(self, message):
+        """Добавление сообщения об успехе"""
+        self.add_step(f"✅ {message}")
+
+    def add_error(self, message):
+        """Добавление сообщения об ошибке"""
+        self.add_step(f"❌ {message}")
+
+    def add_warning(self, message):
+        """Добавление предупреждения"""
+        self.add_step(f"⚠️ {message}")
+
+    def add_info(self, message):
+        """Добавление информационного сообщения"""
+        self.add_step(f"ℹ️ {message}")
+
+    def clear_log(self):
+        """Очистка лога"""
+        self.text_area.clear()
+        self.add_step("🧹 Лог очищен")
+
+
+class ProgressDialog(QDialog):
+    """Диалог прогресса оптимизации"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Выполнение оптимизации")
+        self.setModal(True)
+        self.setFixedSize(400, 150)
+        
+        # Центрирование относительно родительского окна
+        if parent:
+            parent_geo = parent.geometry()
+            x = parent_geo.x() + (parent_geo.width() - 400) // 2
+            y = parent_geo.y() + (parent_geo.height() - 150) // 2
+            self.setGeometry(x, y, 400, 150)
+        
+        # Применение темной темы
+        self.setStyleSheet(DIALOG_STYLE)
+        
+        self.init_ui()
+
+    def init_ui(self):
+        """Инициализация интерфейса"""
+        layout = QVBoxLayout()
+        
+        # Заголовок
+        title_label = QLabel("Выполнение оптимизации...")
+        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+        
+        # Прогресс бар
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+        
+        # Статус
+        self.status_label = QLabel("Подготовка к оптимизации...")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.status_label)
+        
+        self.setLayout(layout)
+
+    def set_progress(self, value, status_text=None):
+        """Установка прогресса"""
+        self.progress_bar.setValue(int(value))
+        if status_text:
+            self.status_label.setText(status_text)
+        
+        # Принудительное обновление интерфейса
+        QApplication.processEvents()
+
+    def closeEvent(self, event):
+        """Перехват события закрытия"""
+        # Не разрешаем закрывать диалог во время выполнения
+        event.ignore()
+
+
+class OptimizationSettingsDialog(QDialog):
+    """Диалог настроек оптимизации"""
+    
+    def __init__(self, parent=None, current_settings=None):
+        super().__init__(parent)
+        self.setWindowTitle("Настройки оптимизации")
+        self.setModal(True)
+        self.setMinimumSize(400, 350)
+        
+        # Центрирование относительно родительского окна
+        if parent:
+            parent_geo = parent.geometry()
+            x = parent_geo.x() + (parent_geo.width() - 400) // 2
+            y = parent_geo.y() + (parent_geo.height() - 350) // 2
+            self.setGeometry(x, y, 400, 350)
+        
+        # Применение темной темы
+        self.setStyleSheet(DIALOG_STYLE)
+        
+        self.current_settings = current_settings or {}
+        self.init_ui()
+        self.load_settings()
+
+    def init_ui(self):
+        """Инициализация интерфейса"""
+        layout = QVBoxLayout()
+        
+        # Заголовок
+        title_label = QLabel("Параметры оптимизации")
+        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+        
+        # Форма настроек
+        form_layout = QFormLayout()
+        
+        # Минимальная длина остатка
+        self.min_remainder_length = QSpinBox()
+        self.min_remainder_length.setRange(10, 10000)
+        self.min_remainder_length.setSuffix(" мм")
+        form_layout.addRow("Мин. длина остатка:", self.min_remainder_length)
+        
+        # Толщина пропила
+        self.blade_width = QSpinBox()
+        self.blade_width.setRange(1, 20)
+        self.blade_width.setSuffix(" мм")
+        form_layout.addRow("Толщина пропила:", self.blade_width)
+        
+        # Максимальный отход
+        self.max_waste_percent = QSpinBox()
+        self.max_waste_percent.setRange(1, 50)
+        self.max_waste_percent.setSuffix(" %")
+        form_layout.addRow("Макс. процент отходов:", self.max_waste_percent)
+        
+        # Использование остатков
+        self.use_remainders = QCheckBox("Использовать остатки со склада")
+        form_layout.addRow(self.use_remainders)
+        
+        # Оптимизировать порядок
+        self.optimize_order = QCheckBox("Оптимизировать порядок распила")
+        form_layout.addRow(self.optimize_order)
+        
+        layout.addLayout(form_layout)
+        
+        # Кнопки
+        button_layout = QHBoxLayout()
+        
+        self.ok_btn = QPushButton("OK")
+        self.ok_btn.clicked.connect(self.accept)
+        button_layout.addWidget(self.ok_btn)
+        
+        self.cancel_btn = QPushButton("Отмена")
+        self.cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_btn)
+        
+        self.reset_btn = QPushButton("По умолчанию")
+        self.reset_btn.clicked.connect(self.reset_defaults)
+        button_layout.addWidget(self.reset_btn)
+        
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+
+    def load_settings(self):
+        """Загрузка текущих настроек"""
+        self.min_remainder_length.setValue(self.current_settings.get('min_remainder_length', 300))
+        self.blade_width.setValue(self.current_settings.get('blade_width', 3))
+        self.max_waste_percent.setValue(self.current_settings.get('max_waste_percent', 15))
+        self.use_remainders.setChecked(self.current_settings.get('use_remainders', True))
+        self.optimize_order.setChecked(self.current_settings.get('optimize_order', True))
+
+    def reset_defaults(self):
+        """Сброс к значениям по умолчанию"""
+        self.min_remainder_length.setValue(300)
+        self.blade_width.setValue(3)
+        self.max_waste_percent.setValue(15)
+        self.use_remainders.setChecked(True)
+        self.optimize_order.setChecked(True)
+
+    def get_settings(self):
+        """Получение настроек"""
+        return {
+            'min_remainder_length': self.min_remainder_length.value(),
+            'blade_width': self.blade_width.value(),
+            'max_waste_percent': self.max_waste_percent.value(),
+            'use_remainders': self.use_remainders.isChecked(),
+            'optimize_order': self.optimize_order.isChecked()
+        }
+
+
+class ApiSettingsDialog(QDialog):
+    """Диалог настроек API"""
+    
+    def __init__(self, parent=None, current_settings=None):
+        super().__init__(parent)
+        self.setWindowTitle("Настройки API")
+        self.setModal(True)
+        self.setMinimumSize(400, 250)
+        
+        # Центрирование относительно родительского окна
+        if parent:
+            parent_geo = parent.geometry()
+            x = parent_geo.x() + (parent_geo.width() - 400) // 2
+            y = parent_geo.y() + (parent_geo.height() - 250) // 2
+            self.setGeometry(x, y, 400, 250)
+        
+        # Применение темной темы
+        self.setStyleSheet(DIALOG_STYLE)
+        
+        self.current_settings = current_settings or {}
+        self.init_ui()
+        self.load_settings()
+
+    def init_ui(self):
+        """Инициализация интерфейса"""
+        layout = QVBoxLayout()
+        
+        # Заголовок
+        title_label = QLabel("Настройки подключения к API")
+        title_label.setFont(QFont("Arial", 12, QFont.Bold))
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+        
+        # Форма настроек
+        form_layout = QFormLayout()
+        
+        # URL сервера
+        self.server_url = QLineEdit()
+        self.server_url.setPlaceholderText("http://localhost:8000")
+        form_layout.addRow("URL сервера:", self.server_url)
+        
+        # Таймаут
+        self.timeout = QSpinBox()
+        self.timeout.setRange(1, 300)
+        self.timeout.setSuffix(" сек")
+        form_layout.addRow("Таймаут:", self.timeout)
+        
+        # Максимальное количество попыток
+        self.max_retries = QSpinBox()
+        self.max_retries.setRange(1, 10)
+        form_layout.addRow("Макс. попыток:", self.max_retries)
+        
+        layout.addLayout(form_layout)
+        
+        # Кнопки
+        button_layout = QHBoxLayout()
+        
+        self.test_btn = QPushButton("Тест соединения")
+        self.test_btn.clicked.connect(self.test_connection)
+        button_layout.addWidget(self.test_btn)
+        
+        button_layout.addStretch()
+        
+        self.ok_btn = QPushButton("OK")
+        self.ok_btn.clicked.connect(self.accept)
+        button_layout.addWidget(self.ok_btn)
+        
+        self.cancel_btn = QPushButton("Отмена")
+        self.cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self.cancel_btn)
+        
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+
+    def load_settings(self):
+        """Загрузка текущих настроек"""
+        self.server_url.setText(self.current_settings.get('server_url', 'http://localhost:8000'))
+        self.timeout.setValue(self.current_settings.get('timeout', 30))
+        self.max_retries.setValue(self.current_settings.get('max_retries', 3))
+
+    def test_connection(self):
+        """Тест соединения с API"""
+        # TODO: Реализовать тест соединения
+        QMessageBox.information(self, "Тест соединения", "Функция тестирования будет реализована позже")
+
+    def get_settings(self):
+        """Получение настроек"""
+        return {
+            'server_url': self.server_url.text().strip(),
+            'timeout': self.timeout.value(),
+            'max_retries': self.max_retries.value()
+        }
