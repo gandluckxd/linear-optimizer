@@ -128,7 +128,7 @@ class SimpleOptimizer:
     
     def _simple_fit_algorithm(self, profiles: List[Profile], stocks: List[Stock], progress_fn=None) -> List[CutPlan]:
         """
-        Простейший алгоритм размещения - First Fit
+        Улучшенный алгоритм размещения с минимизацией отходов
         """
         cut_plans = []
         
@@ -157,13 +157,18 @@ class SimpleOptimizer:
                     'cuts_count': 0
                 })
         
-        # Размещаем куски
+        # Сортируем хлысты по длине (сначала короткие, чтобы использовать их полностью)
+        available_stocks.sort(key=lambda x: x['length'])
+        
+        # Размещаем куски с улучшенным алгоритмом
         placed_count = 0
         
         for piece in pieces_to_place:
             placed = False
+            best_stock = None
+            best_waste = float('inf')
             
-            # Ищем первый подходящий хлыст
+            # Ищем хлыст с минимальными отходами (Best Fit)
             for stock in available_stocks:
                 needed_length = piece['length']
                 
@@ -173,6 +178,9 @@ class SimpleOptimizer:
                 
                 # Проверяем помещается ли
                 if stock['used_length'] + needed_length <= stock['length']:
+                    # Рассчитываем отходы после размещения
+                    remaining_length = stock['length'] - (stock['used_length'] + needed_length)
+                    
                     # Дополнительная проверка: создаем временный план для валидации
                     temp_cuts = stock['cuts'].copy()
                     temp_cuts.append({
@@ -191,22 +199,38 @@ class SimpleOptimizer:
                     
                     # Проверяем, что план корректен
                     if temp_plan.validate(self.settings.blade_width):
-                        # Размещаем кусок
-                        self._add_piece_to_stock(stock, piece)
-                        placed = True
-                        placed_count += 1
-                        break
-                    else:
-                        # Пропускаем этот хлыст, пробуем следующий
-                        continue
+                        # Приоритет: минимальные отходы, но не менее min_remainder_length
+                        if remaining_length < best_waste:
+                            # Если остаток меньше минимального - это хорошо (полное использование)
+                            if remaining_length < self.settings.min_remainder_length:
+                                best_stock = stock
+                                best_waste = remaining_length
+                            # Если остаток больше минимального - тоже хорошо (деловой остаток)
+                            elif remaining_length >= self.settings.min_remainder_length:
+                                best_stock = stock
+                                best_waste = remaining_length
             
-            if not placed:
+            # Размещаем в лучший найденный хлыст
+            if best_stock:
+                self._add_piece_to_stock(best_stock, piece)
+                placed = True
+                placed_count += 1
+            else:
                 print(f"⚠️ Не удалось разместить: {piece['element_name']} ({piece['length']}мм)")
             
             # Обновляем прогресс реже (каждые 10% кусков)
             if progress_fn and total_pieces > 0 and placed_count % max(1, total_pieces // 10) == 0:
-                progress = 40 + (placed_count / total_pieces) * 45
+                progress = 40 + (placed_count / total_pieces) * 30
                 progress_fn(int(progress))
+        
+        if progress_fn:
+            progress_fn(70)
+        
+        # Второй проход: пытаемся заполнить остатки мелкими деталями
+        self._fill_remainders_with_small_pieces(pieces_to_place, available_stocks, progress_fn)
+        
+        # Третий проход: оптимизация размещения комбинаций
+        self._optimize_combinations(available_stocks, progress_fn)
         
         # Создаем планы распила
         for stock in available_stocks:
@@ -236,6 +260,206 @@ class SimpleOptimizer:
                     cut_plans.append(cut_plan)
         
         return cut_plans
+    
+    def _fill_remainders_with_small_pieces(self, all_pieces: List[Dict], available_stocks: List[Dict], progress_fn=None):
+        """
+        Заполняет остатки в хлыстах мелкими деталями для уменьшения отходов
+        """
+        print("🔍 Анализируем остатки для дополнительного размещения...")
+        
+        # Находим все неразмещенные детали
+        unplaced_pieces = []
+        placed_pieces = set()
+        
+        # Собираем уже размещенные детали
+        for stock in available_stocks:
+            for cut in stock['cuts']:
+                for _ in range(cut['quantity']):
+                    placed_pieces.add((cut['profile_id'], cut['length']))
+        
+        # Находим неразмещенные
+        for piece in all_pieces:
+            piece_key = (piece['profile_id'], piece['length'])
+            if piece_key not in placed_pieces:
+                unplaced_pieces.append(piece)
+            elif (piece['profile_id'], piece['length']) in placed_pieces:
+                placed_pieces.discard(piece_key)
+        
+        # Сортируем неразмещенные детали по длине (сначала мелкие)
+        unplaced_pieces.sort(key=lambda x: x['length'])
+        
+        if not unplaced_pieces:
+            print("✅ Все детали уже размещены")
+            return
+        
+        print(f"📦 Найдено {len(unplaced_pieces)} неразмещенных деталей")
+        
+        # Анализируем остатки в хлыстах
+        stocks_with_remainders = []
+        for stock in available_stocks:
+            if stock['cuts']:  # Только используемые хлысты
+                remaining = stock['length'] - stock['used_length']
+                if remaining >= self.settings.min_remainder_length:
+                    stocks_with_remainders.append({
+                        'stock': stock,
+                        'remainder': remaining,
+                        'efficiency': stock['used_length'] / stock['length']
+                    })
+        
+        # Сортируем хлысты по эффективности использования (наименее эффективные первыми)
+        stocks_with_remainders.sort(key=lambda x: x['efficiency'])
+        
+        print(f"🎯 Найдено {len(stocks_with_remainders)} хлыстов с деловыми остатками")
+        
+        additional_placements = 0
+        
+        # Пытаемся разместить мелкие детали в остатки
+        for stock_info in stocks_with_remainders:
+            stock = stock_info['stock']
+            available_space = stock_info['remainder']
+            
+            for piece in unplaced_pieces.copy():
+                needed_length = piece['length'] + self.settings.blade_width  # Всегда добавляем пропил
+                
+                if needed_length <= available_space:
+                    # Проверяем валидность размещения
+                    temp_cuts = stock['cuts'].copy()
+                    temp_cuts.append({
+                        'profile_id': piece['profile_id'],
+                        'length': piece['length'],
+                        'quantity': 1
+                    })
+                    
+                    temp_plan = CutPlan(
+                        stock_id=stock['original_id'],
+                        stock_length=stock['length'],
+                        cuts=temp_cuts,
+                        waste=0,
+                        waste_percent=0
+                    )
+                    
+                    if temp_plan.validate(self.settings.blade_width):
+                        # Размещаем деталь
+                        self._add_piece_to_stock(stock, piece)
+                        unplaced_pieces.remove(piece)
+                        available_space -= needed_length
+                        additional_placements += 1
+                        
+                        print(f"  ✅ Деталь {piece['length']}мм добавлена в остаток хлыста {stock['id']}")
+                        
+                        # Если остаток стал слишком маленьким, переходим к следующему хлысту
+                        if available_space < 100:  # Минимальный размер для поиска
+                            break
+        
+        if additional_placements > 0:
+            print(f"🎉 Дополнительно размещено {additional_placements} деталей в остатки!")
+        else:
+            print("ℹ️ Не удалось разместить дополнительные детали в остатки")
+        
+        if progress_fn:
+            progress_fn(85)
+    
+    def _optimize_combinations(self, available_stocks: List[Dict], progress_fn=None):
+        """
+        Оптимизирует размещение путем поиска лучших комбинаций деталей
+        """
+        print("🔄 Оптимизируем размещение комбинаций...")
+        
+        # Находим хлысты с большими отходами (больше 10% от длины хлыста)
+        inefficient_stocks = []
+        for stock in available_stocks:
+            if stock['cuts']:
+                waste = stock['length'] - stock['used_length']
+                waste_percent = (waste / stock['length']) * 100
+                if waste_percent > 10 and waste < self.settings.min_remainder_length:
+                    inefficient_stocks.append({
+                        'stock': stock,
+                        'waste': waste,
+                        'waste_percent': waste_percent
+                    })
+        
+        if not inefficient_stocks:
+            print("✅ Все хлысты используются эффективно")
+            return
+        
+        print(f"⚠️ Найдено {len(inefficient_stocks)} неэффективных хлыстов")
+        
+        # Сортируем по проценту отходов (худшие первыми)
+        inefficient_stocks.sort(key=lambda x: x['waste_percent'], reverse=True)
+        
+        improvements = 0
+        
+        for stock_info in inefficient_stocks[:3]:  # Оптимизируем только худшие 3
+            stock = stock_info['stock']
+            current_waste = stock_info['waste']
+            
+            print(f"🎯 Оптимизируем хлыст {stock['id']} (отход: {current_waste:.0f}мм, {stock_info['waste_percent']:.1f}%)")
+            
+            # Пытаемся найти лучшую комбинацию с другими хлыстами
+            for other_stock in available_stocks:
+                if other_stock['id'] != stock['id'] and other_stock['cuts']:
+                    # Пробуем объединить детали из двух хлыстов в один
+                    combined_cuts = stock['cuts'] + other_stock['cuts']
+                    combined_length = self._calculate_cuts_length(combined_cuts)
+                    
+                    # Проверяем, помещается ли в один из хлыстов
+                    if combined_length <= stock['length']:
+                        target_stock = stock
+                        source_stock = other_stock
+                    elif combined_length <= other_stock['length']:
+                        target_stock = other_stock
+                        source_stock = stock
+                    else:
+                        continue
+                    
+                    # Создаем временный план для проверки
+                    temp_plan = CutPlan(
+                        stock_id=target_stock['original_id'],
+                        stock_length=target_stock['length'],
+                        cuts=combined_cuts,
+                        waste=0,
+                        waste_percent=0
+                    )
+                    
+                    if temp_plan.validate(self.settings.blade_width):
+                        new_waste = target_stock['length'] - temp_plan.get_used_length(self.settings.blade_width)
+                        total_old_waste = current_waste + (other_stock['length'] - other_stock['used_length'])
+                        
+                        # Если новый вариант лучше (меньше общих отходов)
+                        if new_waste < total_old_waste:
+                            print(f"  ✅ Найдена лучшая комбинация! Экономия: {total_old_waste - new_waste:.0f}мм")
+                            
+                            # Применяем оптимизацию
+                            target_stock['cuts'] = combined_cuts
+                            target_stock['used_length'] = temp_plan.get_used_length(self.settings.blade_width)
+                            target_stock['cuts_count'] = sum(cut['quantity'] for cut in combined_cuts)
+                            
+                            # Очищаем исходный хлыст
+                            source_stock['cuts'] = []
+                            source_stock['used_length'] = 0
+                            source_stock['cuts_count'] = 0
+                            
+                            improvements += 1
+                            break
+        
+        if improvements > 0:
+            print(f"🎉 Выполнено {improvements} оптимизаций размещения!")
+        else:
+            print("ℹ️ Дополнительных оптимизаций не найдено")
+        
+        if progress_fn:
+            progress_fn(90)
+    
+    def _calculate_cuts_length(self, cuts: List[Dict]) -> float:
+        """Рассчитывает общую длину деталей с учетом пропилов"""
+        if not cuts:
+            return 0
+        
+        total_pieces_length = sum(cut['length'] * cut['quantity'] for cut in cuts)
+        total_cuts_count = sum(cut['quantity'] for cut in cuts)
+        saw_width_total = self.settings.blade_width * (total_cuts_count - 1) if total_cuts_count > 1 else 0
+        
+        return total_pieces_length + saw_width_total
     
     def _add_piece_to_stock(self, stock: Dict, piece: Dict):
         """Добавляет кусок в хлыст"""
