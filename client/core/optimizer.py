@@ -173,11 +173,32 @@ class SimpleOptimizer:
                 
                 # Проверяем помещается ли
                 if stock['used_length'] + needed_length <= stock['length']:
-                    # Размещаем кусок
-                    self._add_piece_to_stock(stock, piece)
-                    placed = True
-                    placed_count += 1
-                    break
+                    # Дополнительная проверка: создаем временный план для валидации
+                    temp_cuts = stock['cuts'].copy()
+                    temp_cuts.append({
+                        'profile_id': piece['profile_id'],
+                        'length': piece['length'],
+                        'quantity': 1
+                    })
+                    
+                    temp_plan = CutPlan(
+                        stock_id=stock['original_id'],
+                        stock_length=stock['length'],
+                        cuts=temp_cuts,
+                        waste=0,
+                        waste_percent=0
+                    )
+                    
+                    # Проверяем, что план корректен
+                    if temp_plan.validate(self.settings.blade_width):
+                        # Размещаем кусок
+                        self._add_piece_to_stock(stock, piece)
+                        placed = True
+                        placed_count += 1
+                        break
+                    else:
+                        # Пропускаем этот хлыст, пробуем следующий
+                        continue
             
             if not placed:
                 print(f"⚠️ Не удалось разместить: {piece['element_name']} ({piece['length']}мм)")
@@ -191,7 +212,28 @@ class SimpleOptimizer:
         for stock in available_stocks:
             if stock['cuts']:
                 cut_plan = self._create_cut_plan_from_stock(stock)
-                cut_plans.append(cut_plan)
+                
+                # Валидируем план
+                if not cut_plan.validate(self.settings.blade_width):
+                    analysis = self._analyze_cut_plan(cut_plan)
+                    print(f"⚠️ ВНИМАНИЕ: План распила хлыста {cut_plan.stock_id} некорректен!")
+                    print(f"   Длина хлыста: {analysis['stock_length']:.0f}мм")
+                    print(f"   Сумма деталей: {analysis['total_pieces_length']:.0f}мм")
+                    print(f"   Ширина пропилов: {analysis['saw_width_total']:.0f}мм")
+                    print(f"   Общая использованная длина: {analysis['used_length']:.0f}мм")
+                    print(f"   Превышение: {analysis['used_length'] - analysis['stock_length']:.0f}мм")
+                    print(f"   Детали распила: {analysis['cuts_detail']}")
+                    
+                    # Пытаемся исправить план автоматически
+                    corrected_plans = self._auto_correct_invalid_plan(cut_plan, available_stocks, stocks)
+                    if corrected_plans:
+                        print(f"✅ План автоматически исправлен! Создано планов: {len(corrected_plans)}")
+                        cut_plans.extend(corrected_plans)
+                    else:
+                        print(f"❌ Не удалось автоматически исправить план")
+                        cut_plans.append(cut_plan)  # Добавляем как есть
+                else:
+                    cut_plans.append(cut_plan)
         
         return cut_plans
     
@@ -223,12 +265,25 @@ class SimpleOptimizer:
             })
         
         # Обновляем использованную длину и счетчик
+        # Используем только needed_length, так как он уже включает ширину пропила
         stock['used_length'] += needed_length
         stock['cuts_count'] += 1
     
     def _create_cut_plan_from_stock(self, stock: Dict) -> CutPlan:
         """Создает план распила из заполненного хлыста"""
-        waste = stock['length'] - stock['used_length']
+        # Создаем временный CutPlan для правильного расчета
+        temp_cuts = stock['cuts'].copy()
+        temp_plan = CutPlan(
+            stock_id=stock['original_id'],
+            stock_length=stock['length'],
+            cuts=temp_cuts,
+            waste=0,
+            waste_percent=0
+        )
+        
+        # Рассчитываем правильную использованную длину
+        used_length = temp_plan.get_used_length(self.settings.blade_width)
+        waste = stock['length'] - used_length
         remainder = None
         
         # Проверяем остаток
@@ -249,7 +304,33 @@ class SimpleOptimizer:
     
     def _calculate_stats(self, cut_plans: List[CutPlan]) -> Dict[str, Any]:
         """Рассчитывает статистику"""
-        if not cut_plans:
+        try:
+            if not cut_plans:
+                return {
+                    'total_stocks': 0,
+                    'total_cuts': 0,
+                    'total_length': 0,
+                    'total_waste': 0,
+                    'waste_percent': 0,
+                    'avg_waste_per_stock': 0
+                }
+            
+            total_stocks = len(cut_plans)
+            total_cuts = sum(plan.get_cuts_count() for plan in cut_plans)
+            total_length = sum(plan.stock_length for plan in cut_plans)
+            total_waste = sum(plan.waste for plan in cut_plans)
+            waste_percent = (total_waste / total_length * 100) if total_length > 0 else 0
+            
+            return {
+                'total_stocks': total_stocks,
+                'total_cuts': total_cuts,
+                'total_length': total_length,
+                'total_waste': total_waste,
+                'waste_percent': waste_percent,
+                'avg_waste_per_stock': total_waste / total_stocks if total_stocks > 0 else 0
+            }
+        except Exception as e:
+            print(f"⚠️ Ошибка в _calculate_stats: {e}")
             return {
                 'total_stocks': 0,
                 'total_cuts': 0,
@@ -258,20 +339,25 @@ class SimpleOptimizer:
                 'waste_percent': 0,
                 'avg_waste_per_stock': 0
             }
-        
-        total_stocks = len(cut_plans)
-        total_cuts = sum(sum(cut['quantity'] for cut in plan.cuts) for plan in cut_plans)
-        total_length = sum(plan.stock_length for plan in cut_plans)
-        total_waste = sum(plan.waste for plan in cut_plans)
-        waste_percent = (total_waste / total_length * 100) if total_length > 0 else 0
+    
+    def _analyze_cut_plan(self, cut_plan: CutPlan) -> Dict[str, Any]:
+        """Анализирует план распила и возвращает детальную информацию"""
+        total_pieces_length = cut_plan.get_total_pieces_length()
+        used_length = cut_plan.get_used_length(self.settings.blade_width)
+        cuts_count = cut_plan.get_cuts_count()
+        saw_width_total = self.settings.blade_width * (cuts_count - 1) if cuts_count > 1 else 0
         
         return {
-            'total_stocks': total_stocks,
-            'total_cuts': total_cuts,
-            'total_length': total_length,
-            'total_waste': total_waste,
-            'waste_percent': waste_percent,
-            'avg_waste_per_stock': total_waste / total_stocks if total_stocks > 0 else 0
+            'stock_id': cut_plan.stock_id,
+            'stock_length': cut_plan.stock_length,
+            'total_pieces_length': total_pieces_length,
+            'used_length': used_length,
+            'cuts_count': cuts_count,
+            'saw_width_total': saw_width_total,
+            'waste': cut_plan.waste,
+            'waste_percent': cut_plan.waste_percent,
+            'is_valid': cut_plan.validate(self.settings.blade_width),
+            'cuts_detail': cut_plan.cuts
         }
     
     def _create_error_result(self, message: str) -> OptimizationResult:
@@ -284,6 +370,120 @@ class SimpleOptimizer:
             success=False,
             message=message
         )
+    
+    def _auto_correct_invalid_plan(self, invalid_plan: 'CutPlan', available_stocks: List[Dict], original_stocks: List['Stock']) -> List['CutPlan']:
+        """
+        Автоматическая коррекция некорректного плана распила
+        
+        Args:
+            invalid_plan: Некорректный план распила
+            available_stocks: Доступные хлысты  
+            original_stocks: Исходные хлысты для создания новых
+            
+        Returns:
+            Список исправленных планов распила
+        """
+        try:
+            print(f"🔧 Начинаю автокоррекцию плана хлыста {invalid_plan.stock_id}...")
+            
+            # Получаем детали из некорректного плана
+            pieces_to_redistribute = []
+            for cut in invalid_plan.cuts:
+                if isinstance(cut, dict) and 'length' in cut and 'quantity' in cut and 'profile_id' in cut:
+                    for i in range(cut['quantity']):
+                        pieces_to_redistribute.append({
+                            'profile_id': cut['profile_id'],
+                            'length': cut['length'],
+                            'element_name': f"Переразмещаемая деталь {cut['length']}мм"
+                        })
+            
+            if not pieces_to_redistribute:
+                print("⚠️ Нет деталей для переразмещения")
+                return []
+            
+            print(f"📦 Переразмещаю {len(pieces_to_redistribute)} деталей...")
+            
+            corrected_plans = []
+            unplaced_pieces = pieces_to_redistribute.copy()
+            
+            # Создаем новые хлысты для неразмещенных деталей
+            print(f"📝 Создаю новые хлысты для {len(unplaced_pieces)} деталей...")
+            
+            # Группируем детали по оптимальному размещению
+            while unplaced_pieces:
+                # Находим подходящий хлыст из исходного списка
+                best_stock = None
+                best_stock_usage = 0
+                
+                for orig_stock in original_stocks:
+                    # Симулируем размещение в этот тип хлыста
+                    simulated_length = 0
+                    simulated_count = 0
+                    temp_pieces = unplaced_pieces.copy()
+                    
+                    for piece in temp_pieces:
+                        needed = piece['length'] + (self.settings.blade_width if simulated_count > 0 else 0)
+                        if simulated_length + needed <= orig_stock.length:
+                            simulated_length += needed
+                            simulated_count += 1
+                    
+                    usage_percent = (simulated_length / orig_stock.length) * 100 if orig_stock.length > 0 else 0
+                    if simulated_count > 0 and usage_percent > best_stock_usage:
+                        best_stock = orig_stock
+                        best_stock_usage = usage_percent
+                
+                if best_stock:
+                    # Создаем новый хлыст
+                    new_stock_id = f"auto_{best_stock.id}_{len(corrected_plans) + 1}"
+                    new_stock = {
+                        'id': new_stock_id,
+                        'original_id': best_stock.id,
+                        'length': best_stock.length,
+                        'used_length': 0,
+                        'cuts': [],
+                        'cuts_count': 0
+                    }
+                    
+                    # Размещаем детали в новый хлыст
+                    placed_in_new = []
+                    for piece in unplaced_pieces.copy():  # Копируем для безопасной модификации
+                        needed = piece['length'] + (self.settings.blade_width if new_stock['cuts_count'] > 0 else 0)
+                        if new_stock['used_length'] + needed <= new_stock['length']:
+                            self._add_piece_to_stock(new_stock, piece)
+                            placed_in_new.append(piece)
+                            print(f"  ✅ Деталь {piece['length']}мм размещена в новый хлыст {new_stock_id}")
+                    
+                    # Удаляем размещенные детали из списка неразмещенных
+                    for piece in placed_in_new:
+                        if piece in unplaced_pieces:
+                            unplaced_pieces.remove(piece)
+                    
+                    # Создаем план для нового хлыста
+                    if new_stock['cuts']:
+                        new_plan = self._create_cut_plan_from_stock(new_stock)
+                        if new_plan.validate(self.settings.blade_width):
+                            corrected_plans.append(new_plan)
+                            print(f"  ✅ Создан новый корректный план: хлыст {new_plan.stock_id}")
+                        else:
+                            print(f"  ⚠️ Новый план тоже некорректен: хлыст {new_plan.stock_id}")
+                            corrected_plans.append(new_plan)  # Добавляем даже некорректный
+                else:
+                    print("❌ Не удалось найти подходящий хлыст для оставшихся деталей")
+                    break
+            
+            if unplaced_pieces:
+                print(f"⚠️ Остались неразмещенными {len(unplaced_pieces)} деталей")
+                for piece in unplaced_pieces:
+                    print(f"   - {piece['element_name']}: {piece['length']}мм")
+            
+            print(f"🎯 Автокоррекция завершена. Создано {len(corrected_plans)} планов")
+            return corrected_plans
+            
+        except Exception as e:
+            print(f"❌ Ошибка автокоррекции: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
 
 
 class LinearOptimizer:

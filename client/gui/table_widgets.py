@@ -5,6 +5,8 @@
 
 from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView, QApplication
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5 import QtCore
+from PyQt5.QtGui import QColor
 import logging
 
 # Настройка логирования
@@ -174,21 +176,122 @@ def fill_stock_table(table: QTableWidget, stocks: list):
 
 
 def fill_optimization_results_table(table: QTableWidget, cut_plans: list):
-    """Заполнение таблицы результатов оптимизации"""
+    """Заполнение таблицы результатов оптимизации с улучшенной валидацией"""
     table.setRowCount(0)
     
     for plan in cut_plans:
-        row = table.rowCount()
-        table.insertRow(row)
-        
-        # Формируем строку с распилами
-        cuts_text = "; ".join([f"{cut['quantity']}x{cut['length']}" for cut in plan.cuts])
-        
-        table.setItem(row, 0, _create_text_item(plan.stock_id))
-        table.setItem(row, 1, _create_numeric_item(plan.stock_length))
-        table.setItem(row, 2, _create_text_item(cuts_text))
-        table.setItem(row, 3, _create_numeric_item(plan.waste))
-        table.setItem(row, 4, _create_text_item(f"{plan.waste_percent:.1f}%"))
+        try:
+            row = table.rowCount()
+            table.insertRow(row)
+            
+            # Формируем строку с распилами (безопасно)
+            cuts_parts = []
+            for cut in plan.cuts:
+                if isinstance(cut, dict) and 'quantity' in cut and 'length' in cut:
+                    cuts_parts.append(f"{cut['quantity']}x{cut['length']}")
+                else:
+                    cuts_parts.append("ERROR")
+            cuts_text = "; ".join(cuts_parts) if cuts_parts else "Нет распилов"
+            
+            # Рассчитываем правильную использованную длину
+            used_length = plan.get_used_length(5.0)  # 5мм - ширина пропила
+            total_pieces_length = plan.get_total_pieces_length()
+            cuts_count = plan.get_cuts_count()
+            saw_width_total = 5.0 * (cuts_count - 1) if cuts_count > 1 else 0
+            
+            # Проверяем корректность плана
+            is_valid = plan.validate(5.0)
+            
+            # Добавляем индикатор ошибки если план некорректен
+            status_indicator = ""
+            if not is_valid:
+                status_indicator = " ⚠️ ОШИБКА"
+                cuts_text += status_indicator
+            elif used_length > plan.stock_length * 0.95:  # Если использовано > 95%
+                status_indicator = " ⚡ ПЛОТНО"
+            else:
+                status_indicator = " ✅ ОК"
+            
+            # Рассчитываем реальные отходы (без учета остатков)
+            real_waste = plan.stock_length - used_length
+            remainder = getattr(plan, 'remainder', None)
+            
+            # Формируем отображение отходов с учетом остатков
+            waste_display = f"{plan.waste:.0f}"
+            waste_percent_display = f"{plan.waste_percent:.1f}%"
+            
+            # Если есть остаток, добавляем индикатор
+            if remainder and remainder > 0:
+                waste_display += f" (остаток: {remainder:.0f})"
+                waste_percent_display += " 📦"  # Индикатор остатка
+            
+            # Рассчитываем данные для остатков
+            remainder_length = remainder if remainder and remainder > 0 else 0
+            remainder_percent = (remainder_length / plan.stock_length * 100) if plan.stock_length > 0 and remainder_length > 0 else 0
+            
+            table.setItem(row, 0, _create_text_item(str(plan.stock_id)))
+            table.setItem(row, 1, _create_numeric_item(plan.stock_length))
+            table.setItem(row, 2, _create_text_item(cuts_text))
+            table.setItem(row, 3, _create_text_item(waste_display))
+            table.setItem(row, 4, _create_text_item(waste_percent_display))
+            table.setItem(row, 5, _create_numeric_item(remainder_length))
+            table.setItem(row, 6, _create_text_item(f"{remainder_percent:.1f}%"))
+            
+            # Создаем детальный tooltip для всех планов
+            tooltip_lines = [
+                f"📊 Детальная информация:",
+                f"Длина хлыста: {plan.stock_length:.0f}мм",
+                f"Количество деталей: {cuts_count}шт",
+                f"Сумма длин деталей: {total_pieces_length:.0f}мм",
+                f"Ширина пропилов: {saw_width_total:.0f}мм",
+                f"Общая использованная длина: {used_length:.0f}мм",
+            ]
+            
+            # Добавляем информацию об отходах и остатках
+            if remainder and remainder > 0:
+                tooltip_lines.append(f"🔨 Деловой остаток: {remainder:.0f}мм ({remainder_percent:.1f}%) - пригоден для использования")
+                tooltip_lines.append(f"🗑️ Отходы: {plan.waste:.0f}мм ({plan.waste_percent:.1f}%) - непригодный материал")
+                tooltip_lines.append(f"📏 Всего неиспользовано: {real_waste:.0f}мм")
+            else:
+                tooltip_lines.append(f"🗑️ Отходы: {plan.waste:.0f}мм ({plan.waste_percent:.1f}%) - весь неиспользованный материал")
+                tooltip_lines.append(f"🔨 Деловых остатков: нет (< {300}мм)")
+            
+            tooltip_lines.append(f"Статус: {'✅ Корректно' if is_valid else '❌ ОШИБКА - превышена длина хлыста!'}")
+            
+            if not is_valid:
+                tooltip_lines.append(f"⚠️ ПРЕВЫШЕНИЕ: {used_length - plan.stock_length:.0f}мм")
+            
+            tooltip = "\n".join(tooltip_lines)
+            
+            # Применяем tooltip ко всем ячейкам строки
+            for col in range(table.columnCount()):
+                item = table.item(row, col)
+                if item:
+                    item.setToolTip(tooltip)
+                    # Цветовая индикация для проблемных планов
+                    try:
+                        if not is_valid:
+                            # Красный фон для ошибочных планов
+                            item.setBackground(QColor(255, 200, 200))  # Светло-красный
+                        elif used_length > plan.stock_length * 0.95:
+                            # Желтый фон для плотных планов
+                            item.setBackground(QColor(255, 255, 200))  # Светло-желтый
+                    except Exception as color_error:
+                        print(f"⚠️ Ошибка установки цвета: {color_error}")
+                        # Продолжаем без цвета
+                        
+        except Exception as e:
+            print(f"⚠️ Ошибка при отображении плана {plan.stock_id if hasattr(plan, 'stock_id') else 'unknown'}: {e}")
+            # Создаем строку с ошибкой
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setItem(row, 0, _create_text_item("ERROR"))
+            table.setItem(row, 1, _create_text_item("ERROR"))
+            table.setItem(row, 2, _create_text_item(f"Ошибка: {str(e)}"))
+            table.setItem(row, 3, _create_text_item("ERROR"))
+            table.setItem(row, 4, _create_text_item("ERROR"))
+            table.setItem(row, 5, _create_text_item("ERROR"))
+            table.setItem(row, 6, _create_text_item("ERROR"))
     
     # Обновляем размеры столбцов
     table.resizeColumnsToContents()

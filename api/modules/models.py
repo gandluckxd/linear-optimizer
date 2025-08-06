@@ -65,6 +65,37 @@ class CutPlan(BaseModel):
     waste: float  # Отход в мм
     waste_percent: float  # Процент отхода
     remainder: Optional[float] = None  # Остаток (если больше минимального)
+    
+    def get_used_length(self, saw_width: float = 5.0) -> float:
+        """Получить использованную длину с учетом пропилов"""
+        if not self.cuts:
+            return 0.0
+        
+        total_length = 0.0
+        total_cuts = 0
+        
+        for cut in self.cuts:
+            total_length += cut['length'] * cut['quantity']
+            total_cuts += cut['quantity']
+        
+        # Добавляем ширину пропилов (количество пропилов = количество кусков - 1)
+        if total_cuts > 1:
+            total_length += saw_width * (total_cuts - 1)
+        
+        return total_length
+    
+    def get_total_pieces_length(self) -> float:
+        """Получить общую длину всех кусков без учета пропилов"""
+        return sum(cut['length'] * cut['quantity'] for cut in self.cuts)
+    
+    def get_cuts_count(self) -> int:
+        """Получить общее количество кусков"""
+        return sum(cut['quantity'] for cut in self.cuts)
+    
+    def validate(self, saw_width: float = 5.0) -> bool:
+        """Проверить корректность плана распила"""
+        used_length = self.get_used_length(saw_width)
+        return used_length <= self.stock_length
 
 # Модели для загрузки результатов в Altawin
 

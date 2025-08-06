@@ -50,23 +50,28 @@ class DataLoadThread(QThread):
     data_loaded = pyqtSignal(list, dict)  # profiles, stock_data
     finished_loading = pyqtSignal()
     
-    def __init__(self, api_client, order_id):
+    def __init__(self, api_client, order_ids):
         super().__init__()
         self.api_client = api_client
-        self.order_id = order_id
+        self.order_ids = order_ids if isinstance(order_ids, list) else [order_ids]
     
     def run(self):
         """Основная логика загрузки данных"""
         try:
-            self.debug_step.emit(f"🔄 Загрузка данных для заказа {self.order_id}...")
+            self.debug_step.emit(f"🔄 Загрузка данных для {len(self.order_ids)} сменных заданий...")
             
-            # Загружаем профили
-            self.debug_step.emit("📋 Загрузка профилей...")
-            profiles = self.api_client.get_profiles(self.order_id)
-            self.debug_step.emit(f"✅ Загружено {len(profiles)} профилей")
+            # Загружаем профили для всех заказов
+            all_profiles = []
+            for i, order_id in enumerate(self.order_ids):
+                self.debug_step.emit(f"📋 Загрузка профилей для заказа {order_id} ({i+1}/{len(self.order_ids)})...")
+                profiles = self.api_client.get_profiles(order_id)
+                all_profiles.extend(profiles)
+                self.debug_step.emit(f"✅ Загружено {len(profiles)} профилей для заказа {order_id}")
+            
+            self.debug_step.emit(f"📊 Всего загружено {len(all_profiles)} профилей")
             
             # Получаем уникальные артикулы профилей
-            profile_codes = list(set(profile.profile_code for profile in profiles))
+            profile_codes = list(set(profile.profile_code for profile in all_profiles))
             
             # Загружаем остатки со склада
             self.debug_step.emit("📦 Загрузка остатков со склада...")
@@ -79,7 +84,7 @@ class DataLoadThread(QThread):
             self.debug_step.emit(f"✅ Загружено {len(stock_materials)} материалов")
             
             # Отправляем данные в главный поток
-            self.data_loaded.emit(profiles, {'remainders': stock_remainders, 'materials': stock_materials})
+            self.data_loaded.emit(all_profiles, {'remainders': stock_remainders, 'materials': stock_materials})
             self.debug_step.emit("🎉 Загрузка данных завершена успешно!")
             self.success_occurred.emit()
             
@@ -373,10 +378,11 @@ class LinearOptimizerWindow(QMainWindow):
         # Поля ввода и загрузки
         input_layout = QHBoxLayout()
         
-        input_layout.addWidget(QLabel("ID заказа:"))
+        input_layout.addWidget(QLabel("ID сменных заданий:"))
         self.order_id_input = QLineEdit()
-        self.order_id_input.setPlaceholderText("Введите номер заказа")
-        self.order_id_input.setMaximumWidth(150)
+        self.order_id_input.setPlaceholderText("Введите ID через запятую (например: 30074, 30075, 30076)")
+        self.order_id_input.setMinimumWidth(300)
+        self.order_id_input.setMaximumWidth(400)
         input_layout.addWidget(self.order_id_input)
         
         self.load_data_button = QPushButton("Загрузить данные")
@@ -530,7 +536,7 @@ class LinearOptimizerWindow(QMainWindow):
         
         self.results_table = QTableWidget()
         setup_table_columns(self.results_table, [
-            'Хлыст (ID)', 'Длина хлыста (мм)', 'Распилы', 'Отход (мм)', 'Отход (%)'
+            'Хлыст (ID)', 'Длина хлыста (мм)', 'Распилы', 'Отход (мм)', 'Отход (%)', 'Остаток (мм)', 'Остаток (%)'
         ])
         
         # Включаем сортировку
@@ -589,6 +595,15 @@ class LinearOptimizerWindow(QMainWindow):
         self.stats_efficiency.setStyleSheet(WIDGET_CONFIGS["stats_labels"]["remnants"])
         right_layout.addRow("Эффективность:", self.stats_efficiency)
         
+        # Добавляем статистику деловых остатков
+        self.stats_remainders_length = QLabel("0 м")
+        self.stats_remainders_length.setStyleSheet(WIDGET_CONFIGS["stats_labels"]["remnants"])
+        right_layout.addRow("Деловые остатки:", self.stats_remainders_length)
+        
+        self.stats_remainders_percent = QLabel("0.00 %")
+        self.stats_remainders_percent.setStyleSheet(WIDGET_CONFIGS["stats_labels"]["remnants"])
+        right_layout.addRow("Процент остатков:", self.stats_remainders_percent)
+        
         stats_layout.addLayout(right_layout)
         layout.addLayout(stats_layout)
         
@@ -612,15 +627,25 @@ class LinearOptimizerWindow(QMainWindow):
     
     def on_load_data_clicked(self):
         """Обработчик загрузки данных с API"""
-        order_id = self.order_id_input.text().strip()
-        if not order_id:
-            QMessageBox.warning(self, "Ошибка", "Введите номер заказа")
+        order_ids_text = self.order_id_input.text().strip()
+        if not order_ids_text:
+            QMessageBox.warning(self, "Ошибка", "Введите ID сменных заданий")
             return
         
+        # Парсим ID заказов
         try:
-            order_id = int(order_id)
+            order_ids = []
+            for order_id_str in order_ids_text.split(','):
+                order_id = order_id_str.strip()
+                if order_id:
+                    order_ids.append(int(order_id))
+            
+            if not order_ids:
+                QMessageBox.warning(self, "Ошибка", "Не найдено валидных ID заказов")
+                return
+                
         except ValueError:
-            QMessageBox.warning(self, "Ошибка", "ID заказа должен быть числом")
+            QMessageBox.warning(self, "Ошибка", "ID заказов должны быть числами, разделенными запятыми")
             return
         
         # Блокируем кнопку
@@ -637,7 +662,7 @@ class LinearOptimizerWindow(QMainWindow):
             self.data_load_thread.wait()
         
         # Создаем и настраиваем новый поток загрузки
-        self.data_load_thread = DataLoadThread(self.api_client, order_id)
+        self.data_load_thread = DataLoadThread(self.api_client, order_ids)
         
         # Подключаем сигналы потока к методам главного окна
         self.data_load_thread.debug_step.connect(self._add_debug_step_safe)
@@ -708,12 +733,26 @@ class LinearOptimizerWindow(QMainWindow):
             QMessageBox.warning(self, "Предупреждение", "Нет результатов для сохранения")
             return
         
+        # Парсим ID заказов
+        order_ids_text = self.order_id_input.text().strip()
+        order_ids = []
+        if order_ids_text:
+            for order_id_str in order_ids_text.split(','):
+                order_id = order_id_str.strip()
+                if order_id and order_id.isdigit():
+                    order_ids.append(int(order_id))
+        
+        if not order_ids:
+            QMessageBox.warning(self, "Ошибка", "Не найдено ID заказов для сохранения")
+            return
+        
         # Диалог подтверждения
+        order_info = f"Заказ {order_ids[0]}" if len(order_ids) == 1 else f"Заказы {', '.join(map(str, order_ids))}"
         reply = QMessageBox.question(
             self, 
             "Подтверждение сохранения", 
             f"Вы точно хотите сохранить результаты оптимизации в Altawin?\n\n"
-            f"Заказ: {self.current_order_id}\n"
+            f"{order_info}\n"
             f"Количество хлыстов: {len(self.optimization_result.cut_plans)}\n"
             f"Эффективность: {100 - self.optimization_result.get_statistics()['waste_percent']:.1f}%",
             QMessageBox.Yes | QMessageBox.No,
@@ -722,14 +761,24 @@ class LinearOptimizerWindow(QMainWindow):
         
         if reply == QMessageBox.Yes:
             try:
-                success = self.api_client.upload_optimization_result(
-                    self.current_order_id,
-                    self.optimization_result
-                )
+                # Сохраняем результаты для каждого заказа
+                success_count = 0
+                for order_id in order_ids:
+                    success = self.api_client.upload_optimization_result(
+                        order_id,
+                        self.optimization_result
+                    )
+                    if success:
+                        success_count += 1
                 
-                if success:
-                    QMessageBox.information(self, "Успех", "Результаты успешно сохранены в Altawin")
-                    self.status_bar.showMessage("Результаты сохранены")
+                if success_count == len(order_ids):
+                    QMessageBox.information(self, "Успех", f"Результаты успешно сохранены для всех {len(order_ids)} заказов")
+                    self.status_bar.showMessage(f"Результаты сохранены для {success_count} заказов")
+                elif success_count > 0:
+                    QMessageBox.warning(self, "Частичный успех", f"Результаты сохранены для {success_count} из {len(order_ids)} заказов")
+                    self.status_bar.showMessage(f"Результаты сохранены для {success_count} заказов")
+                else:
+                    QMessageBox.critical(self, "Ошибка", "Не удалось сохранить результаты ни для одного заказа")
                 
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Ошибка сохранения: {str(e)}")
@@ -777,7 +826,15 @@ class LinearOptimizerWindow(QMainWindow):
             self.profiles = profiles
             self.stock_remainders = stock_data.get('remainders', [])
             self.stock_materials = stock_data.get('materials', [])
-            self.current_order_id = int(self.order_id_input.text().strip()) if self.order_id_input.text().strip().isdigit() else None
+            
+            # Парсим ID заказов для отображения
+            order_ids_text = self.order_id_input.text().strip()
+            order_ids = []
+            if order_ids_text:
+                for order_id_str in order_ids_text.split(','):
+                    order_id = order_id_str.strip()
+                    if order_id and order_id.isdigit():
+                        order_ids.append(int(order_id))
             
             # Создаем объединенный список stocks для оптимизации
             self.stocks = []
@@ -816,12 +873,14 @@ class LinearOptimizerWindow(QMainWindow):
             fill_stock_remainders_table(self.stock_remainders_table, [r.__dict__ for r in self.stock_remainders])
             fill_stock_materials_table(self.stock_materials_table, [m.__dict__ for m in self.stock_materials])
             
-            # Обновляем информацию о заказе
+            # Обновляем информацию о заказах
             total_stock_items = len(self.stock_remainders) + len(self.stock_materials)
-            self.order_info_label.setText(
-                f"Заказ {self.current_order_id}: {len(profiles)} профилей, "
-                f"{len(self.stock_remainders)} остатков, {len(self.stock_materials)} материалов"
-            )
+            if len(order_ids) == 1:
+                order_info = f"Заказ {order_ids[0]}: {len(profiles)} профилей, {len(self.stock_remainders)} остатков, {len(self.stock_materials)} материалов"
+            else:
+                order_info = f"Заказы {', '.join(map(str, order_ids))}: {len(profiles)} профилей, {len(self.stock_remainders)} остатков, {len(self.stock_materials)} материалов"
+            
+            self.order_info_label.setText(order_info)
             
             # Активируем кнопку оптимизации
             self.optimize_button.setEnabled(True)
@@ -843,25 +902,36 @@ class LinearOptimizerWindow(QMainWindow):
     
     def _handle_optimization_result(self, result):
         """Обработка результата оптимизации"""
-        self.optimization_result = result
-        
-        # Восстанавливаем кнопку
-        self.optimize_button.setEnabled(True)
-        self.optimize_button.setText("🚀 Запустить оптимизацию")
-        
-        # Обновляем статистику
-        self._update_statistics(result)
-        
-        # Обновляем таблицу результатов
-        fill_optimization_results_table(self.results_table, result.cut_plans)
-        
-        # Активируем кнопку загрузки в Altawin
-        self.upload_to_altawin_button.setEnabled(True)
-        
-        # Переключаемся на вкладку результатов
-        self.tabs.setCurrentIndex(1)
-        
-        print(f"✅ Оптимизация завершена! Использовано хлыстов: {len(result.cut_plans)}")
+        try:
+            self.optimization_result = result
+            
+            # Восстанавливаем кнопку
+            self.optimize_button.setEnabled(True)
+            self.optimize_button.setText("🚀 Запустить оптимизацию")
+            
+            # Обновляем статистику
+            self._update_statistics(result)
+            
+            # Обновляем таблицу результатов
+            if result.cut_plans:
+                fill_optimization_results_table(self.results_table, result.cut_plans)
+            else:
+                print("⚠️ Нет планов распила для отображения")
+            
+            # Активируем кнопку загрузки в Altawin
+            self.upload_to_altawin_button.setEnabled(True)
+            
+            # Переключаемся на вкладку результатов
+            self.tabs.setCurrentIndex(1)
+            
+            cut_plans_count = len(result.cut_plans) if result.cut_plans else 0
+            print(f"✅ Оптимизация завершена! Использовано хлыстов: {cut_plans_count}")
+            
+        except Exception as e:
+            print(f"⚠️ Ошибка при обработке результата оптимизации: {e}")
+            import traceback
+            traceback.print_exc()
+            self._handle_optimization_error(f"Ошибка отображения результатов: {str(e)}")
     
     def _handle_optimization_error(self, error_msg):
         """Обработка ошибки оптимизации"""
@@ -889,14 +959,41 @@ class LinearOptimizerWindow(QMainWindow):
     
     def _update_statistics(self, result):
         """Обновление статистики"""
-        stats = result.get_statistics()
-        
-        self.stats_total_stocks.setText(str(stats['total_stocks']))
-        self.stats_total_cuts.setText(str(stats['total_cuts']))
-        self.stats_total_length.setText(f"{stats['total_length'] / 1000:.1f} м")
-        self.stats_waste_length.setText(f"{stats['total_waste'] / 1000:.1f} м")
-        self.stats_waste_percent.setText(f"{stats['waste_percent']:.2f} %")
-        self.stats_efficiency.setText(f"{100 - stats['waste_percent']:.2f} %")
+        try:
+            stats = result.get_statistics()
+            
+            # Рассчитываем деловые остатки
+            total_remainders = 0
+            total_length = stats.get('total_length', 0)
+            
+            for plan in result.cut_plans:
+                remainder = getattr(plan, 'remainder', None)
+                if remainder and remainder > 0:
+                    total_remainders += remainder
+            
+            remainders_percent = (total_remainders / total_length * 100) if total_length > 0 else 0
+            
+            self.stats_total_stocks.setText(str(stats.get('total_stocks', 0)))
+            self.stats_total_cuts.setText(str(stats.get('total_cuts', 0)))
+            self.stats_total_length.setText(f"{stats.get('total_length', 0) / 1000:.1f} м")
+            self.stats_waste_length.setText(f"{stats.get('total_waste', 0) / 1000:.1f} м")
+            self.stats_waste_percent.setText(f"{stats.get('waste_percent', 0):.2f} %")
+            self.stats_efficiency.setText(f"{100 - stats.get('waste_percent', 0):.2f} %")
+            
+            # Обновляем статистику деловых остатков
+            self.stats_remainders_length.setText(f"{total_remainders / 1000:.1f} м")
+            self.stats_remainders_percent.setText(f"{remainders_percent:.2f} %")
+        except Exception as e:
+            print(f"⚠️ Ошибка при обновлении статистики: {e}")
+            # Устанавливаем значения по умолчанию
+            self.stats_total_stocks.setText("0")
+            self.stats_total_cuts.setText("0")
+            self.stats_total_length.setText("0.0 м")
+            self.stats_waste_length.setText("0.0 м")
+            self.stats_waste_percent.setText("0.00 %")
+            self.stats_efficiency.setText("100.00 %")
+            self.stats_remainders_length.setText("0.0 м")
+            self.stats_remainders_percent.setText("0.00 %")
 
     # ========== МЕТОДЫ МЕНЮ ==========
     
@@ -952,8 +1049,14 @@ class LinearOptimizerWindow(QMainWindow):
             "© 2024 Your Company")
 
     def set_order_id(self, order_id: int):
-        """Установить ID заказа"""
+        """Установить ID заказа (для обратной совместимости)"""
         self.order_id_input.setText(str(order_id))
+        self.on_load_data_clicked()
+    
+    def set_order_ids(self, order_ids: list):
+        """Установить несколько ID заказов"""
+        order_ids_str = ", ".join(map(str, order_ids))
+        self.order_id_input.setText(order_ids_str)
         self.on_load_data_clicked()
 
     def closeEvent(self, event):
