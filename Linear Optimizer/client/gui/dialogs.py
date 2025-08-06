@@ -80,8 +80,8 @@ class DebugDialog(QDialog):
             self.text_area.verticalScrollBar().maximum()
         )
         
-        # Принудительная обработка событий для обновления интерфейса
-        QApplication.processEvents()
+        # Убрали QApplication.processEvents() - он может вызывать recursive repaint
+        # Интерфейс обновляется автоматически при добавлении текста
         
         print(f"🔧 DEBUG: {formatted_message}")
 
@@ -110,6 +110,9 @@ class DebugDialog(QDialog):
 class ProgressDialog(QDialog):
     """Диалог прогресса оптимизации"""
     
+    # Сигнал для thread-safe обновления прогресса
+    progress_signal = pyqtSignal(int, str)
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Выполнение оптимизации")
@@ -127,6 +130,9 @@ class ProgressDialog(QDialog):
         self.setStyleSheet(DIALOG_STYLE)
         
         self.init_ui()
+        
+        # Подключаем сигнал для thread-safe обновления
+        self.progress_signal.connect(self._update_progress_safe)
 
     def init_ui(self):
         """Инициализация интерфейса"""
@@ -152,18 +158,45 @@ class ProgressDialog(QDialog):
         self.setLayout(layout)
 
     def set_progress(self, value, status_text=None):
-        """Установка прогресса"""
-        self.progress_bar.setValue(int(value))
-        if status_text:
-            self.status_label.setText(status_text)
+        """
+        Установка прогресса (thread-safe)
+        Используется из фонового потока
+        """
+        if status_text is None:
+            status_text = f"Выполнено {value}%..."
         
-        # Принудительное обновление интерфейса
-        QApplication.processEvents()
+        # Отправляем сигнал для thread-safe обновления
+        self.progress_signal.emit(int(value), status_text)
+    
+    def _update_progress_safe(self, value, status_text):
+        """
+        Thread-safe обновление прогресса
+        Выполняется в главном потоке UI
+        """
+        try:
+            self.progress_bar.setValue(value)
+            self.status_label.setText(status_text)
+            # Убираем processEvents() - он вызывает recursive repaint
+        except Exception as e:
+            print(f"⚠️ Ошибка обновления прогресса: {e}")
 
     def closeEvent(self, event):
         """Перехват события закрытия"""
-        # Не разрешаем закрывать диалог во время выполнения
-        event.ignore()
+        # Разрешаем закрытие только при завершении (100%)
+        current_value = self.progress_bar.value()
+        if current_value >= 100:
+            event.accept()
+        else:
+            # Не разрешаем закрывать диалог во время выполнения
+            event.ignore()
+    
+    def force_close(self):
+        """Принудительное закрытие диалога"""
+        try:
+            self.progress_bar.setValue(100)
+            self.accept()
+        except Exception as e:
+            print(f"⚠️ Ошибка закрытия диалога прогресса: {e}")
 
 
 class OptimizationSettingsDialog(QDialog):

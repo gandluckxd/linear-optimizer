@@ -206,12 +206,9 @@ def _ensure_table_update(table: QTableWidget):
             current_width = header.sectionSize(i)
             header.resizeSection(i, current_width + 20)
         
-        # Обновляем виджет
-        table.update()
-        table.viewport().update()
-        
-        # Обрабатываем события Qt для корректного отображения
-        QApplication.processEvents()
+        # Обновляем виджет (убрали processEvents для избежания recursive repaint)
+        # table.update() и table.viewport().update() также могут вызывать проблемы
+        # Оставляем только автоматическое обновление через Qt
         
     except Exception as e:
         logger.warning(f"Error updating table display: {e}")
@@ -239,8 +236,8 @@ def update_table_column_widths(table: QTableWidget):
         for i in range(table.columnCount()):
             header.setSectionResizeMode(i, QHeaderView.ResizeToContents)
         
-        # Обрабатываем события Qt для пересчета размеров
-        QApplication.processEvents()
+        # Убрали QApplication.processEvents() - он вызывает recursive repaint
+        # Размеры пересчитаются автоматически
         
         # Через короткий интервал переключаем в интерактивный режим
         QTimer.singleShot(50, lambda: _set_interactive_mode(table))

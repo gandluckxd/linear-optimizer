@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QIcon, QShowEvent
 import sys
-import threading
+# import threading  # Убрали - теперь используем QThread
 from datetime import datetime
 import functools
 import requests
@@ -25,7 +25,7 @@ import logging
 
 # Импорты для модульной архитектуры
 from core.api_client import get_api_client
-from core.optimizer import LinearOptimizer, OptimizationSettings
+from core.optimizer import LinearOptimizer, CuttingStockOptimizer, OptimizationSettings, SolverType
 from core.models import Profile, Stock, OptimizationResult, StockRemainder, StockMaterial
 from .table_widgets import (
     _create_text_item, _create_numeric_item, setup_table_columns,
@@ -38,6 +38,125 @@ from .config import MAIN_WINDOW_STYLE, TAB_STYLE, SPECIAL_BUTTON_STYLES, WIDGET_
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
+
+
+class DataLoadThread(QThread):
+    """Поток для загрузки данных из API"""
+    
+    # Сигналы для коммуникации с главным потоком
+    debug_step = pyqtSignal(str)
+    error_occurred = pyqtSignal(str, str, str)  # title, message, icon
+    success_occurred = pyqtSignal()
+    data_loaded = pyqtSignal(list, dict)  # profiles, stock_data
+    finished_loading = pyqtSignal()
+    
+    def __init__(self, api_client, order_id):
+        super().__init__()
+        self.api_client = api_client
+        self.order_id = order_id
+    
+    def run(self):
+        """Основная логика загрузки данных"""
+        try:
+            self.debug_step.emit(f"🔄 Загрузка данных для заказа {self.order_id}...")
+            
+            # Загружаем профили
+            self.debug_step.emit("📋 Загрузка профилей...")
+            profiles = self.api_client.get_profiles(self.order_id)
+            self.debug_step.emit(f"✅ Загружено {len(profiles)} профилей")
+            
+            # Получаем уникальные артикулы профилей
+            profile_codes = list(set(profile.profile_code for profile in profiles))
+            
+            # Загружаем остатки со склада
+            self.debug_step.emit("📦 Загрузка остатков со склада...")
+            stock_remainders = self.api_client.get_stock_remainders(profile_codes)
+            self.debug_step.emit(f"✅ Загружено {len(stock_remainders)} остатков")
+            
+            # Загружаем материалы со склада
+            self.debug_step.emit("📦 Загрузка материалов со склада...")
+            stock_materials = self.api_client.get_stock_materials(profile_codes)
+            self.debug_step.emit(f"✅ Загружено {len(stock_materials)} материалов")
+            
+            # Отправляем данные в главный поток
+            self.data_loaded.emit(profiles, {'remainders': stock_remainders, 'materials': stock_materials})
+            self.debug_step.emit("🎉 Загрузка данных завершена успешно!")
+            self.success_occurred.emit()
+            
+        except Exception as e:
+            self.debug_step.emit(f"❌ Ошибка загрузки: {e}")
+            self.error_occurred.emit("Ошибка загрузки", str(e), "critical")
+        finally:
+            self.finished_loading.emit()
+
+
+class OptimizationThread(QThread):
+    """Поток для выполнения оптимизации"""
+    
+    # Сигналы для коммуникации с главным потоком
+    debug_step = pyqtSignal(str)
+    optimization_result = pyqtSignal(object)  # OptimizationResult
+    optimization_error = pyqtSignal(str)
+    progress_updated = pyqtSignal(int)  # процент выполнения
+    finished_optimization = pyqtSignal()
+    
+    def __init__(self, optimizer, profiles, stocks, settings):
+        super().__init__()
+        self.optimizer = optimizer
+        self.profiles = profiles
+        self.stocks = stocks
+        self.settings = settings
+    
+    def run(self):
+        """Основная логика оптимизации"""
+        try:
+            self.debug_step.emit("🔧 DEBUG: Поток оптимизации запущен")
+            
+            def progress_callback(percent):
+                """Коллбэк для обновления прогресса"""
+                self.progress_updated.emit(int(percent))
+                self.debug_step.emit(f"🔧 DEBUG: Прогресс {percent}%")
+            
+            # Проверяем данные
+            if not self.profiles:
+                self.optimization_error.emit("Нет профилей для оптимизации")
+                return
+                
+            if not self.stocks:
+                self.optimization_error.emit("Нет хлыстов для оптимизации")
+                return
+            
+            self.debug_step.emit("🔧 DEBUG: Вызываем optimizer.optimize()")
+            
+            # Запуск оптимизации
+            result = self.optimizer.optimize(
+                profiles=self.profiles,
+                stocks=self.stocks,
+                settings=self.settings,
+                progress_fn=progress_callback
+            )
+            
+            self.debug_step.emit(f"🔧 DEBUG: Оптимизация завершена, результат: {result}")
+            
+            if result and result.success:
+                self.optimization_result.emit(result)
+                self.debug_step.emit(f"✅ Оптимизация успешна: {len(result.cut_plans)} планов")
+            else:
+                error_msg = "Оптимизация не дала результатов"
+                if result and hasattr(result, 'message'):
+                    error_msg = result.message
+                self.debug_step.emit(f"❌ Оптимизация неуспешна: {error_msg}")
+                self.optimization_error.emit(error_msg)
+                
+        except Exception as e:
+            import traceback
+            error_msg = f"Ошибка оптимизации: {str(e)}"
+            self.debug_step.emit(f"❌ Исключение в оптимизации: {error_msg}")
+            self.debug_step.emit(f"❌ Трассировка: {traceback.format_exc()}")
+            self.optimization_error.emit(error_msg)
+        finally:
+            self.debug_step.emit("🔧 DEBUG: Закрываем диалог прогресса")
+            self.finished_optimization.emit()
 
 
 class LinearOptimizerWindow(QMainWindow):
@@ -72,6 +191,10 @@ class LinearOptimizerWindow(QMainWindow):
         # Инициализация диалогов
         self.debug_dialog = None
         self.progress_dialog = None
+        
+        # Инициализация потоков
+        self.data_load_thread = None
+        self.optimization_thread = None
         
         # Настройка UI
         self.init_ui()
@@ -508,51 +631,38 @@ class LinearOptimizerWindow(QMainWindow):
         self.debug_dialog = DebugDialog(self)
         self.debug_dialog.show()
         
-        # Запускаем загрузку в отдельном потоке
-        def load_data():
-            try:
-                self._add_debug_step(f"🔄 Загрузка данных для заказа {order_id}...")
-                
-                # Загружаем профили
-                self._add_debug_step("📋 Загрузка профилей...")
-                profiles = self.api_client.get_profiles(order_id)
-                self._add_debug_step(f"✅ Загружено {len(profiles)} профилей")
-                
-                # Получаем уникальные артикулы профилей
-                profile_codes = list(set(profile.profile_code for profile in profiles))
-                
-                # Загружаем остатки со склада
-                self._add_debug_step("📦 Загрузка остатков со склада...")
-                stock_remainders = self.api_client.get_stock_remainders(profile_codes)
-                self._add_debug_step(f"✅ Загружено {len(stock_remainders)} остатков")
-                
-                # Загружаем материалы со склада
-                self._add_debug_step("📦 Загрузка материалов со склада...")
-                stock_materials = self.api_client.get_stock_materials(profile_codes)
-                self._add_debug_step(f"✅ Загружено {len(stock_materials)} материалов")
-                
-                # Обновляем данные в UI
-                self.data_loaded_signal.emit(profiles, {'remainders': stock_remainders, 'materials': stock_materials})
-                self._add_debug_step("🎉 Загрузка данных завершена успешно!")
-                self.success_signal.emit()
-                
-            except Exception as e:
-                self._add_debug_step(f"❌ Ошибка загрузки: {e}")
-                self.error_signal.emit("Ошибка загрузки", str(e), "critical")
-            finally:
-                self.restore_button_signal.emit()
+        # Останавливаем предыдущий поток если он еще работает
+        if self.data_load_thread and self.data_load_thread.isRunning():
+            self.data_load_thread.terminate()
+            self.data_load_thread.wait()
         
-        # Запускаем в потоке
-        thread = threading.Thread(target=load_data, daemon=True)
-        thread.start()
+        # Создаем и настраиваем новый поток загрузки
+        self.data_load_thread = DataLoadThread(self.api_client, order_id)
+        
+        # Подключаем сигналы потока к методам главного окна
+        self.data_load_thread.debug_step.connect(self._add_debug_step_safe)
+        self.data_load_thread.error_occurred.connect(self._show_error_safe)
+        self.data_load_thread.success_occurred.connect(self._show_success_safe)
+        self.data_load_thread.data_loaded.connect(self._update_tables_safe)
+        self.data_load_thread.finished_loading.connect(self._restore_button_safe)
+        
+        # Запускаем поток
+        self.data_load_thread.start()
 
     # ========== МЕТОДЫ ОПТИМИЗАЦИИ ==========
     
     def on_optimize_clicked(self):
         """Обработчик кнопки оптимизации"""
+        # Проверяем данные
         if not self.profiles:
             QMessageBox.warning(self, "Предупреждение", "Сначала загрузите данные заказа")
             return
+            
+        if not hasattr(self, 'stocks') or not self.stocks:
+            QMessageBox.warning(self, "Предупреждение", "Нет данных о хлыстах на складе")
+            return
+        
+        print(f"🔧 DEBUG: Запуск оптимизации с {len(self.profiles)} профилями и {len(self.stocks)} хлыстами")
         
         # Блокируем кнопку
         self.optimize_button.setEnabled(False)
@@ -569,39 +679,28 @@ class LinearOptimizerWindow(QMainWindow):
         self.current_settings.pair_optimization = self.pair_optimization.isChecked()
         self.current_settings.use_remainders = self.use_remainders.isChecked()
         
-        # Запускаем оптимизацию в отдельном потоке
-        def run_optimization():
-            try:
-                def progress_callback(percent):
-                    if self.progress_dialog:
-                        self.progress_dialog.set_progress(percent)
-                
-                # Запуск оптимизации
-                result = self.optimizer.optimize(
-                    profiles=self.profiles,
-                    stocks=self.stocks,
-                    settings=self.current_settings,
-                    progress_fn=progress_callback
-                )
-                
-                if result and result.success:
-                    self.optimization_result = result
-                    self.optimization_result_signal.emit(result)
-                else:
-                    error_msg = "Оптимизация не дала результатов"
-                    if result and hasattr(result, 'message'):
-                        error_msg = result.message
-                    self.optimization_error_signal.emit(error_msg)
-                    
-            except Exception as e:
-                error_msg = f"Ошибка оптимизации: {str(e)}"
-                self.optimization_error_signal.emit(error_msg)
-            finally:
-                self.close_progress_signal.emit()
+        # Останавливаем предыдущий поток если он еще работает
+        if self.optimization_thread and self.optimization_thread.isRunning():
+            self.optimization_thread.terminate()
+            self.optimization_thread.wait()
         
-        # Запускаем в отдельном потоке
-        thread = threading.Thread(target=run_optimization, daemon=True)
-        thread.start()
+        # Создаем и настраиваем новый поток оптимизации
+        self.optimization_thread = OptimizationThread(
+            self.optimizer, 
+            self.profiles, 
+            self.stocks, 
+            self.current_settings
+        )
+        
+        # Подключаем сигналы потока к методам главного окна
+        self.optimization_thread.debug_step.connect(self._add_debug_step_safe)
+        self.optimization_thread.optimization_result.connect(self._handle_optimization_result)
+        self.optimization_thread.optimization_error.connect(self._handle_optimization_error)
+        self.optimization_thread.progress_updated.connect(self._update_progress)
+        self.optimization_thread.finished_optimization.connect(self._close_progress_dialog)
+        
+        # Запускаем поток
+        self.optimization_thread.start()
 
     def on_save_results(self):
         """Сохранение результатов в Altawin"""
@@ -680,6 +779,38 @@ class LinearOptimizerWindow(QMainWindow):
             self.stock_materials = stock_data.get('materials', [])
             self.current_order_id = int(self.order_id_input.text().strip()) if self.order_id_input.text().strip().isdigit() else None
             
+            # Создаем объединенный список stocks для оптимизации
+            self.stocks = []
+            stock_id = 1
+            
+            # Добавляем остатки
+            for remainder in self.stock_remainders:
+                stock = Stock(
+                    id=stock_id,
+                    profile_id=1,  # Базовый ID
+                    length=remainder.length,
+                    quantity=remainder.quantity_pieces,
+                    location="Остатки",
+                    is_remainder=True
+                )
+                self.stocks.append(stock)
+                stock_id += 1
+            
+            # Добавляем материалы
+            for material in self.stock_materials:
+                stock = Stock(
+                    id=stock_id,
+                    profile_id=1,  # Базовый ID
+                    length=material.length,
+                    quantity=material.quantity_pieces,
+                    location="Материалы",
+                    is_remainder=False
+                )
+                self.stocks.append(stock)
+                stock_id += 1
+            
+            print(f"🔧 DEBUG: Создано {len(self.stocks)} хлыстов для оптимизации")
+            
             # Обновляем таблицы
             fill_profiles_table(self.profiles_table, [p.__dict__ for p in profiles])
             fill_stock_remainders_table(self.stock_remainders_table, [r.__dict__ for r in self.stock_remainders])
@@ -742,11 +873,19 @@ class LinearOptimizerWindow(QMainWindow):
         print(f"❌ Ошибка оптимизации: {error_msg}")
         QMessageBox.critical(self, "Ошибка оптимизации", f"Произошла ошибка во время выполнения оптимизации:\n\n{error_msg}")
     
+    def _update_progress(self, percent):
+        """Обновление прогресса оптимизации"""
+        if self.progress_dialog:
+            self.progress_dialog.set_progress(percent)
+    
     def _close_progress_dialog(self):
         """Закрытие диалога прогресса"""
-        if self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
+        try:
+            if self.progress_dialog:
+                self.progress_dialog.force_close()
+                self.progress_dialog = None
+        except Exception as e:
+            print(f"⚠️ Ошибка закрытия диалога прогресса: {e}")
     
     def _update_statistics(self, result):
         """Обновление статистики"""

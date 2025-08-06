@@ -76,6 +76,7 @@ class OptimizationResult:
     created_at: datetime = field(default_factory=datetime.now)
     success: bool = True
     message: str = ""
+    statistics: Dict = field(default_factory=dict)
     
     def get_statistics(self) -> Dict:
         """Получить статистику оптимизации"""

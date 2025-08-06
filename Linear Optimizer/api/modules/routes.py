@@ -26,7 +26,6 @@ async def get_profiles(request: ProfileRequest):
     Получить список профилей для распила из заказа
     """
     try:
-        # TODO: Реализовать после получения SQL запроса от Артема
         profiles = get_profiles_for_order(request.order_id)
         return profiles
     except Exception as e:
@@ -38,7 +37,6 @@ async def get_stock(request: StockRequest):
     Получить остатки профиля на складе
     """
     try:
-        # TODO: Реализовать после получения SQL запроса от Артема
         stock = get_stock_for_profile(request.profile_id)
         return stock
     except Exception as e:
@@ -50,7 +48,6 @@ async def upload_result(request: UploadRequest):
     Загрузить результаты оптимизации в Altawin
     """
     try:
-        # TODO: Реализовать после получения SQL запроса от Артема
         result = save_optimization_result(
             request.optimization_result,
             request.save_to_order,
@@ -94,13 +91,125 @@ async def get_moskitka_profiles_endpoint(request: MoskitkaRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/optimize")
+async def optimize_profiles(request: dict):
+    """
+    Запустить оптимизацию распила профилей
+    """
+    try:
+        # Импортируем оптимизатор локально (избегаем проблем с путями)
+        import sys
+        import os
+        
+        # Добавляем путь к клиентской части только если нужно
+        client_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'client')
+        if client_path not in sys.path:
+            sys.path.insert(0, client_path)
+        
+        # Пытаемся импортировать с обработкой ошибок
+        try:
+            from core.optimizer import CuttingStockOptimizer, OptimizationSettings, SolverType
+            from core.models import Profile as OptimizerProfile, Stock as OptimizerStock
+        except ImportError as e:
+            raise HTTPException(status_code=500, detail=f"Ошибка импорта оптимизатора: {str(e)}")
+        
+        # Получаем входные данные
+        order_id = request.get('order_id')
+        if not order_id:
+            raise HTTPException(status_code=400, detail="order_id обязателен")
+        
+        # Настройки оптимизации (можно получать из запроса)
+        settings = OptimizationSettings(
+            blade_width=request.get('blade_width', 5.0),
+            min_remainder_length=request.get('min_remainder_length', 300.0),
+            time_limit_seconds=request.get('time_limit', 300),
+            solver_type=SolverType.CP_SAT  # Используем лучший алгоритм
+        )
+        
+        # Получаем профили для распила
+        profiles_data = get_profiles_for_order(order_id)
+        if not profiles_data:
+            return {"success": False, "message": "Нет профилей для распила"}
+        
+        # Получаем остатки для каждого уникального типа профиля
+        profile_ids = list(set(p.id for p in profiles_data))
+        all_stocks = []
+        
+        for profile_id in profile_ids:
+            stocks = get_stock_for_profile(profile_id)
+            all_stocks.extend(stocks)
+        
+        if not all_stocks:
+            return {"success": False, "message": "Нет материалов на складе"}
+        
+        # Конвертируем в модели оптимизатора
+        optimizer_profiles = [
+            OptimizerProfile(
+                id=p.id,
+                order_id=p.order_id,
+                element_name=p.element_name,
+                profile_code=p.profile_code,
+                length=p.length,
+                quantity=p.quantity
+            ) for p in profiles_data
+        ]
+        
+        optimizer_stocks = [
+            OptimizerStock(
+                id=s.id,
+                profile_id=s.profile_id,
+                length=s.length,
+                quantity=s.quantity,
+                location=s.location or "",
+                is_remainder=s.is_remainder
+            ) for s in all_stocks
+        ]
+        
+        # Запускаем оптимизацию
+        optimizer = CuttingStockOptimizer(settings)
+        result = optimizer.optimize(optimizer_profiles, optimizer_stocks)
+        
+        if result.success:
+            return {
+                "success": True,
+                "message": result.message,
+                "cut_plans": [
+                    {
+                        "stock_id": plan.stock_id,
+                        "stock_length": plan.stock_length,
+                        "cuts": plan.cuts,
+                        "waste": plan.waste,
+                        "waste_percent": plan.waste_percent,
+                        "remainder": plan.remainder
+                    } for plan in result.cut_plans
+                ],
+                "total_waste": result.total_waste,
+                "total_waste_percent": result.total_waste_percent,
+                "statistics": result.get_statistics()
+            }
+        else:
+            return {
+                "success": False,
+                "message": result.message,
+                "cut_plans": [],
+                "total_waste": 0,
+                "total_waste_percent": 0
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка оптимизации: {str(e)}")
+
 @router.get("/test-connection")
 async def test_connection():
     """
     Проверить соединение с базой данных
     """
     try:
-        # TODO: Реализовать проверку соединения
-        return {"status": "connected", "database": "Altawin"}
+        from utils.db_functions import test_db_connection
+        is_connected = test_db_connection()
+        return {
+            "status": "connected" if is_connected else "disconnected", 
+            "database": "Altawin"
+        }
     except Exception as e:
         return {"status": "error", "detail": str(e)} 

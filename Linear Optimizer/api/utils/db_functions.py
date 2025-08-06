@@ -327,7 +327,7 @@ def save_optimization_result(optimization_result, save_to_order: bool, create_cu
                 3.0,  # CUTWIDTH (ширина пропила)
                 100.0,  # MINREST (минимальный остаток)
                 plan.remainder or plan.waste,  # OSTAT (остаток)
-                plan.get_used_length(),  # SUMPROF (сумма отпиленных кусков)
+                sum(cut['length'] * cut['quantity'] for cut in plan.cuts),  # SUMPROF (сумма отпиленных кусков)
                 (plan.remainder or 0) / plan.stock_length * 100,  # RESTPERCENT
                 plan.waste_percent,  # TRASHPERCENT
                 cut_map  # MAP (карта распила)
