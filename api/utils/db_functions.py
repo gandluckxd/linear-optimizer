@@ -4,7 +4,7 @@
 
 import fdb
 from modules.config import DB_CONFIG, ENABLE_LOGGING
-from modules.models import Profile, Stock, MoskitkaProfile, StockRemainder, StockMaterial
+from modules.models import Profile, Stock, MoskitkaProfile, StockRemainder, StockMaterial, GrordersMos, OptimizedMos, OptDetailMos
 from typing import List
 
 def get_db_connection():
@@ -496,3 +496,253 @@ def test_db_connection():
         return result is not None
     except Exception as e:
         return False 
+
+
+def insert_grorders_mos(name: str) -> GrordersMos:
+    """
+    Вставить запись в таблицу GRORDERS_MOS и вернуть созданную запись
+    Использует генератор GEN_GRORDERS_MOS_ID для получения нового ID
+    """
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        # Начинаем транзакцию
+        con.begin()
+
+        # Получаем новый ID из генератора
+        cur.execute("SELECT GEN_ID(GEN_GRORDERS_MOS_ID, 1) FROM RDB$DATABASE")
+        new_id_row = cur.fetchone()
+        new_id = int(new_id_row[0]) if new_id_row and new_id_row[0] is not None else None
+
+        # Простой INSERT по аналогии с другими функциями
+        insert_sql = """
+        INSERT INTO GRORDERS_MOS (ID, NAME)
+        VALUES (?, ?)
+        """
+        cur.execute(insert_sql, (new_id, name))
+
+        # Фиксируем транзакцию
+        con.commit()
+        con.close()
+
+        return GrordersMos(id=new_id, name=name)
+    except Exception as e:
+        try:
+            con.rollback()
+        except:
+            pass
+        if ENABLE_LOGGING:
+            print(f"Ошибка вставки в GRORDERS_MOS: {e}")
+        raise
+
+
+def insert_optimized_mos(
+    *,
+    grorder_mos_id: int,
+    goodsid: int,
+    qty: int,
+    isbar: int,
+    longprof: float | None = None,
+    cutwidth: int | None = None,
+    border: int | None = None,
+    minrest: int | None = None,
+    mintrash: int | None = None,
+    map: str | None = None,
+    ostat: float | None = None,
+    sumprof: float | None = None,
+    restpercent: float | None = None,
+    trashpercent: float | None = None,
+    beginindent: int | None = None,
+    endindent: int | None = None,
+    sumtrash: float | None = None,
+) -> OptimizedMos:
+    """
+    Вставка записи в OPTIMIZED_MOS. Возвращает созданную запись.
+    Используем генератор GEN_OPTIMIZED_MOS_ID и явный INSERT по аналогии с другими функциями.
+    Обязательные поля: GRORDER_MOS_ID, GOODSID, QTY, ISBAR
+    """
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        con.begin()
+
+        # Получаем новый ID
+        cur.execute("SELECT GEN_ID(GEN_OPTIMIZED_MOS_ID, 1) FROM RDB$DATABASE")
+        new_id_row = cur.fetchone()
+        new_id = int(new_id_row[0]) if new_id_row and new_id_row[0] is not None else None
+
+        insert_sql = (
+            "INSERT INTO OPTIMIZED_MOS ("
+            "OPTIMIZED_MOS_ID, GRORDER_MOS_ID, GOODSID, QTY, LONGPROF, CUTWIDTH, BORDER, MINREST, MINTRASH, MAP, ISFORPAIR, OSTAT, SUMPROF, RESTPERCENT, TRASHPERCENT, BEGININDENT, ENDINDENT, SUMTRASH, ISBAR"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        )
+
+        cur.execute(
+            insert_sql,
+            (
+                new_id,
+                grorder_mos_id,
+                goodsid,
+                qty,
+                longprof,
+                cutwidth,
+                border,
+                minrest,
+                mintrash,
+                map,
+                0,  # ISFORPAIR по умолчанию 0, если не требуется иное
+                ostat,
+                sumprof,
+                restpercent,
+                trashpercent,
+                beginindent,
+                endindent,
+                sumtrash,
+                isbar,
+            ),
+        )
+
+        con.commit()
+        con.close()
+
+        return OptimizedMos(
+            id=new_id,
+            grorder_mos_id=grorder_mos_id,
+            goodsid=goodsid,
+            qty=qty,
+            longprof=longprof,
+            cutwidth=cutwidth,
+            border=border,
+            minrest=minrest,
+            mintrash=mintrash,
+            map=map,
+            isbar=isbar,
+            ostat=ostat,
+            sumprof=sumprof,
+            restpercent=restpercent,
+            trashpercent=trashpercent,
+            beginindent=beginindent,
+            endindent=endindent,
+            sumtrash=sumtrash,
+        )
+    except Exception as e:
+        try:
+            con.rollback()
+        except:
+            pass
+        if ENABLE_LOGGING:
+            print(f"Ошибка вставки в OPTIMIZED_MOS: {e}")
+        raise
+
+
+def insert_optdetail_mos(
+    *,
+    optimized_mos_id: int,
+    orderid: int,
+    qty: int,
+    itemsdetailid: int | None = None,
+    itemlong: float | None = None,
+    ug1: float | None = None,
+    ug2: float | None = None,
+    num: int | None = None,
+    subnum: int | None = None,
+    long_al: float | None = None,
+    izdpart: str | None = None,
+    partside: str | None = None,
+    modelno: int | None = None,
+    modelheight: int | None = None,
+    modelwidth: int | None = None,
+    flugelopentype: int | None = None,
+    flugelcount: int | None = None,
+    ishandle: int | None = None,
+    handlepos: float | None = None,
+    handleposfalts: float | None = None,
+    flugelopentag: str | None = None,
+) -> OptDetailMos:
+    """
+    Вставка записи в OPTDETAIL_MOS. Возвращает созданную запись.
+    Используем генератор GEN_OPTDETAIL_MOS_ID и простой INSERT.
+    Обязательные поля: OPTIMIZED_MOS_ID, ORDERID, QTY
+    """
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        con.begin()
+
+        # Получаем новый ID
+        cur.execute("SELECT GEN_ID(GEN_OPTDETAIL_MOS_ID, 1) FROM RDB$DATABASE")
+        new_id_row = cur.fetchone()
+        new_id = int(new_id_row[0]) if new_id_row and new_id_row[0] is not None else None
+
+        insert_sql = (
+            "INSERT INTO OPTDETAIL_MOS ("
+            "OPTDETAIL_MOS_ID, OPTIMIZED_MOS_ID, ORDERID, ITEMSDETAILID, ITEMLONG, QTY, UG1, UG2, NUM, SUBNUM, LONG_AL, IZDPART, PARTSIDE, MODELNO, MODELHEIGHT, MODELWIDTH, FLUGELOPENTYPE, FLUGELCOUNT, ISHANDLE, HANDLEPOS, HANDLEPOSFALTS, FLUGELOPENTAG"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        )
+
+        cur.execute(
+            insert_sql,
+            (
+                new_id,
+                optimized_mos_id,
+                orderid,
+                itemsdetailid,
+                itemlong,
+                qty,
+                ug1,
+                ug2,
+                num,
+                subnum,
+                long_al,
+                izdpart,
+                partside,
+                modelno,
+                modelheight,
+                modelwidth,
+                flugelopentype,
+                flugelcount,
+                ishandle,
+                handlepos,
+                handleposfalts,
+                flugelopentag,
+            ),
+        )
+
+        con.commit()
+        con.close()
+
+        return OptDetailMos(
+            id=new_id,
+            optimized_mos_id=optimized_mos_id,
+            orderid=orderid,
+            itemsdetailid=itemsdetailid,
+            itemlong=itemlong,
+            qty=qty,
+            ug1=ug1,
+            ug2=ug2,
+            num=num,
+            subnum=subnum,
+            long_al=long_al,
+            izdpart=izdpart,
+            partside=partside,
+            modelno=modelno,
+            modelheight=modelheight,
+            modelwidth=modelwidth,
+            flugelopentype=flugelopentype,
+            flugelcount=flugelcount,
+            ishandle=ishandle,
+            handlepos=handlepos,
+            handleposfalts=handleposfalts,
+            flugelopentag=flugelopentag,
+        )
+    except Exception as e:
+        try:
+            con.rollback()
+        except:
+            pass
+        if ENABLE_LOGGING:
+            print(f"Ошибка вставки в OPTDETAIL_MOS: {e}")
+        raise

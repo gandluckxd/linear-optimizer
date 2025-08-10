@@ -160,3 +160,113 @@ class MoskitkaProfile(BaseModel):
     
     # Расчетные поля
     total_length_needed: Optional[float] = None  # Общая необходимая длина 
+
+# Модели для таблицы GRORDERS_MOS
+
+class GrordersMosCreate(BaseModel):
+    """Входная модель для создания записи в GRORDERS_MOS"""
+    name: str
+
+
+class GrordersMos(BaseModel):
+    """Модель записи таблицы GRORDERS_MOS"""
+    id: int
+    name: Optional[str] = None
+
+
+# Модели для таблицы OPTIMIZED_MOS
+
+class OptimizedMosCreate(BaseModel):
+    """Входная модель для создания записи в OPTIMIZED_MOS"""
+    grorder_mos_id: int
+    goodsid: int
+    qty: int
+    isbar: int
+    longprof: Optional[float] = None
+    cutwidth: Optional[int] = None
+    border: Optional[int] = None
+    minrest: Optional[int] = None
+    mintrash: Optional[int] = None
+    map: Optional[str] = None
+    ostat: Optional[float] = None
+    sumprof: Optional[float] = None
+    restpercent: Optional[float] = None
+    trashpercent: Optional[float] = None
+    beginindent: Optional[int] = None
+    endindent: Optional[int] = None
+    sumtrash: Optional[float] = None
+
+
+class OptimizedMos(BaseModel):
+    """Модель записи таблицы OPTIMIZED_MOS"""
+    id: int
+    grorder_mos_id: int
+    goodsid: int
+    qty: int
+    isbar: int
+    longprof: Optional[float] = None
+    cutwidth: Optional[int] = None
+    border: Optional[int] = None
+    minrest: Optional[int] = None
+    mintrash: Optional[int] = None
+    map: Optional[str] = None
+    ostat: Optional[float] = None
+    sumprof: Optional[float] = None
+    restpercent: Optional[float] = None
+    trashpercent: Optional[float] = None
+    beginindent: Optional[int] = None
+    endindent: Optional[int] = None
+    sumtrash: Optional[float] = None
+
+
+# Модели для таблицы OPTDETAIL_MOS
+
+class OptDetailMosCreate(BaseModel):
+    """Входная модель для создания записи в OPTDETAIL_MOS"""
+    optimized_mos_id: int
+    orderid: int
+    qty: int
+    itemsdetailid: Optional[int] = None
+    itemlong: Optional[float] = None
+    ug1: Optional[float] = None
+    ug2: Optional[float] = None
+    num: Optional[int] = None
+    subnum: Optional[int] = None
+    long_al: Optional[float] = None
+    izdpart: Optional[str] = None
+    partside: Optional[str] = None
+    modelno: Optional[int] = None
+    modelheight: Optional[int] = None
+    modelwidth: Optional[int] = None
+    flugelopentype: Optional[int] = None
+    flugelcount: Optional[int] = None
+    ishandle: Optional[int] = None
+    handlepos: Optional[float] = None
+    handleposfalts: Optional[float] = None
+    flugelopentag: Optional[str] = None
+
+
+class OptDetailMos(BaseModel):
+    """Модель записи таблицы OPTDETAIL_MOS"""
+    id: int
+    optimized_mos_id: int
+    orderid: int
+    qty: int
+    itemsdetailid: Optional[int] = None
+    itemlong: Optional[float] = None
+    ug1: Optional[float] = None
+    ug2: Optional[float] = None
+    num: Optional[int] = None
+    subnum: Optional[int] = None
+    long_al: Optional[float] = None
+    izdpart: Optional[str] = None
+    partside: Optional[str] = None
+    modelno: Optional[int] = None
+    modelheight: Optional[int] = None
+    modelwidth: Optional[int] = None
+    flugelopentype: Optional[int] = None
+    flugelcount: Optional[int] = None
+    ishandle: Optional[int] = None
+    handlepos: Optional[float] = None
+    handleposfalts: Optional[float] = None
+    flugelopentag: Optional[str] = None

@@ -7,7 +7,10 @@ from typing import List
 from modules.models import (
     ProfileRequest, StockRequest, Profile, Stock, 
     OptimizationResult, UploadRequest, MoskitkaRequest, MoskitkaProfile,
-    StockRemainderRequest, StockMaterialRequest, StockRemainder, StockMaterial
+    StockRemainderRequest, StockMaterialRequest, StockRemainder, StockMaterial,
+    GrordersMosCreate, GrordersMos,
+    OptimizedMosCreate, OptimizedMos,
+    OptDetailMosCreate, OptDetailMos
 )
 from utils.db_functions import (
     get_profiles_for_order,
@@ -15,7 +18,10 @@ from utils.db_functions import (
     save_optimization_result,
     get_moskitka_profiles,
     get_stock_remainders,
-    get_stock_materials
+    get_stock_materials,
+    insert_grorders_mos,
+    insert_optimized_mos,
+    insert_optdetail_mos
 )
 
 router = APIRouter()
@@ -198,6 +204,81 @@ async def optimize_profiles(request: dict):
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка оптимизации: {str(e)}")
+
+@router.post("/grorders-mos", response_model=GrordersMos)
+async def create_grorders_mos(request: GrordersMosCreate):
+    """
+    Создать запись в таблице GRORDERS_MOS
+    """
+    try:
+        created = insert_grorders_mos(name=request.name)
+        return created
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/optimized-mos", response_model=OptimizedMos)
+async def create_optimized_mos(request: OptimizedMosCreate):
+    """
+    Создать запись в таблице OPTIMIZED_MOS
+    """
+    try:
+        created = insert_optimized_mos(
+            grorder_mos_id=request.grorder_mos_id,
+            goodsid=request.goodsid,
+            qty=request.qty,
+            isbar=request.isbar,
+            longprof=request.longprof,
+            cutwidth=request.cutwidth,
+            border=request.border,
+            minrest=request.minrest,
+            mintrash=request.mintrash,
+            map=request.map,
+            ostat=request.ostat,
+            sumprof=request.sumprof,
+            restpercent=request.restpercent,
+            trashpercent=request.trashpercent,
+            beginindent=request.beginindent,
+            endindent=request.endindent,
+            sumtrash=request.sumtrash,
+        )
+        return created
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/optdetail-mos", response_model=OptDetailMos)
+async def create_optdetail_mos(request: OptDetailMosCreate):
+    """
+    Создать запись в таблице OPTDETAIL_MOS
+    """
+    try:
+        created = insert_optdetail_mos(
+            optimized_mos_id=request.optimized_mos_id,
+            orderid=request.orderid,
+            qty=request.qty,
+            itemsdetailid=request.itemsdetailid,
+            itemlong=request.itemlong,
+            ug1=request.ug1,
+            ug2=request.ug2,
+            num=request.num,
+            subnum=request.subnum,
+            long_al=request.long_al,
+            izdpart=request.izdpart,
+            partside=request.partside,
+            modelno=request.modelno,
+            modelheight=request.modelheight,
+            modelwidth=request.modelwidth,
+            flugelopentype=request.flugelopentype,
+            flugelcount=request.flugelcount,
+            ishandle=request.ishandle,
+            handlepos=request.handlepos,
+            handleposfalts=request.handleposfalts,
+            flugelopentag=request.flugelopentag,
+        )
+        return created
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/test-connection")
 async def test_connection():
