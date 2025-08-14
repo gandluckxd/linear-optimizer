@@ -23,6 +23,7 @@ from utils.db_functions import (
     insert_grorders_mos,
     insert_optimized_mos,
     insert_optdetail_mos,
+    enrich_optdetail_mos_fields,
     get_grorder_ids_by_grorders_mos_id,
     delete_grorders_mos
     ,delete_optimized_mos_by_grorders_mos_id
@@ -289,17 +290,14 @@ async def create_optdetail_mos(request: OptDetailMosCreate):
     Создать запись в таблице OPTDETAIL_MOS
     """
     try:
-        created = insert_optdetail_mos(
+        # Обогащаем поля перед вставкой, чтобы в insert_optdetail_mos попадали корректные значения
+        enriched = enrich_optdetail_mos_fields(
             optimized_mos_id=request.optimized_mos_id,
             orderid=request.orderid,
-            qty=request.qty,
-            itemsdetailid=request.itemsdetailid,
             itemlong=request.itemlong,
+            itemsdetailid=request.itemsdetailid,
             ug1=request.ug1,
             ug2=request.ug2,
-            num=request.num,
-            subnum=request.subnum,
-            long_al=request.long_al,
             izdpart=request.izdpart,
             partside=request.partside,
             modelno=request.modelno,
@@ -311,6 +309,31 @@ async def create_optdetail_mos(request: OptDetailMosCreate):
             handlepos=request.handlepos,
             handleposfalts=request.handleposfalts,
             flugelopentag=request.flugelopentag,
+        )
+
+        created = insert_optdetail_mos(
+            optimized_mos_id=request.optimized_mos_id,
+            orderid=request.orderid,
+            qty=request.qty,
+            itemsdetailid=enriched.get("itemsdetailid"),
+            itemlong=request.itemlong,
+            ug1=enriched.get("ug1"),
+            ug2=enriched.get("ug2"),
+            num=request.num,
+            subnum=request.subnum,
+            long_al=request.long_al,
+            # Поменяли местами загрузку: izdpart <- partside, partside <- izdpart
+            izdpart=enriched.get("izdpart"),
+            partside=enriched.get("partside"),
+            modelno=enriched.get("modelno"),
+            modelheight=enriched.get("modelheight"),
+            modelwidth=enriched.get("modelwidth"),
+            flugelopentype=enriched.get("flugelopentype"),
+            flugelcount=enriched.get("flugelcount"),
+            ishandle=enriched.get("ishandle"),
+            handlepos=enriched.get("handlepos"),
+            handleposfalts=enriched.get("handleposfalts"),
+            flugelopentag=enriched.get("flugelopentag"),
         )
         return created
     except Exception as e:

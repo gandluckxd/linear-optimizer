@@ -235,8 +235,8 @@ class APIClient:
         profiles: List[Profile],
         blade_width_mm: int = 5,
         min_remainder_mm: int = 300,
-        begin_indent_mm: int = 10,
-        end_indent_mm: int = 10,
+        begin_indent_mm: int = 0,
+        end_indent_mm: int = 0,
         min_trash_mm: int = 50,
     ) -> bool:
         """
@@ -256,39 +256,9 @@ class APIClient:
 
             # Маппинги для удобства
             goodsid_to_orderid: Dict[int, int] = {}
-            goodsid_to_marking: Dict[int, str] = {}
             for p in profiles:
                 # В наших профилях id = goodsid, order_id = grorderid
                 goodsid_to_orderid[int(p.id)] = int(p.order_id)
-                try:
-                    goodsid_to_marking[int(p.id)] = str(p.profile_code)
-                except Exception:
-                    pass
-
-            # Получаем расширенные данные деталей для всех grorder_ids
-            # Это позволит заполнить ITEMSDETAILID, UG1/UG2, IZDPART, PARTSIDE, MODELNO и размеры
-            # 1) по grorders_mos_id -> grorder_ids
-            grorder_ids = self.get_grorders_by_mos_id(grorders_mos_id)
-            # 2) запросим у API профиль москитных сеток (переиспользуем существующий эндпойнт)
-            mos_profiles: List[dict] = []
-            try:
-                resp = self.session.post(
-                    f"{self.base_url}/api/moskitka-profiles",
-                    json={"grorder_ids": grorder_ids},
-                    timeout=60,
-                )
-                resp.raise_for_status()
-                mos_profiles = resp.json() if isinstance(resp.json(), list) else []
-            except Exception:
-                mos_profiles = []
-
-            # Индексы для быстрых поисков
-            # Ключ: (grorder_id, length, goods_marking?) — но надежнее маппить по ITEMSDETAIL
-            # Создадим индекс по (grorder_id, detail_length)
-            index_by_grorder_and_length: Dict[tuple, List[dict]] = {}
-            for mp in mos_profiles:
-                key = (int(mp.get("grorder_id", 0)), float(mp.get("detail_length") or 0.0))
-                index_by_grorder_and_length.setdefault(key, []).append(mp)
 
             # Очистка предыдущих данных для текущего сменного задания
             self.delete_optimized_mos_by_grorders_mos_id(grorders_mos_id)
@@ -370,39 +340,24 @@ class APIClient:
                         if qty_val <= 0 or length_val <= 0:
                             continue
 
-                        # Пытаемся подобрать запись детали для заполнения дополнительных полей
-                        matched_profile: Optional[dict] = None
-                        if order_id_for_piece is not None:
-                            candidates = index_by_grorder_and_length.get((int(order_id_for_piece), float(length_val)), [])
-                            if candidates:
-                                # Если знаем артикул по goodsid, отфильтруем по нему
-                                marking = goodsid_to_marking.get(pid)
-                                if marking:
-                                    filtered = [c for c in candidates if str(c.get("goods_marking", "")) == str(marking)]
-                                    if filtered:
-                                        matched_profile = filtered[0]
-                                # Если по артикулу не нашли, возьмем первую подходящую
-                                if not matched_profile and candidates:
-                                    matched_profile = candidates[0]
-
                         detail_payload = {
                             "optimized_mos_id": optimized_mos_id,
                             "orderid": int(order_id_for_piece or 0),
                             "qty": int(qty_val),
-                            "itemsdetailid": int(matched_profile.get("item_detail_id")) if matched_profile and matched_profile.get("item_detail_id") else None,
+                            "itemsdetailid": None,
                             "itemlong": float(length_val),
-                            "ug1": float(matched_profile.get("angle1")) if matched_profile and matched_profile.get("angle1") is not None else None,
-                            "ug2": float(matched_profile.get("angle2")) if matched_profile and matched_profile.get("angle2") is not None else None,
+                            "ug1": None,
+                            "ug2": None,
                             "num": bar_index,  # номер хлыста в плане
                             "subnum": subnum_counter,
                             "long_al": float(length_val) + float(blade_width_mm),
-                            "izdpart": matched_profile.get("izd_part") if matched_profile else None,
-                            "partside": matched_profile.get("part_side") if matched_profile else None,
-                            "modelno": int(matched_profile.get("model_no")) if matched_profile and matched_profile.get("model_no") is not None else None,
-                            "modelheight": int(matched_profile.get("order_height")) if matched_profile and matched_profile.get("order_height") is not None else None,
-                            "modelwidth": int(matched_profile.get("order_width")) if matched_profile and matched_profile.get("order_width") is not None else None,
+                            "izdpart": None,
+                            "partside": None,
+                            "modelno": None,
+                            "modelheight": None,
+                            "modelwidth": None,
                             "flugelopentype": None,
-                            "flugelcount": int(matched_profile.get("grorder_qty")) if matched_profile and matched_profile.get("grorder_qty") is not None else None,
+                            "flugelcount": None,
                             "ishandle": None,
                             "handlepos": None,
                             "handleposfalts": None,

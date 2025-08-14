@@ -150,11 +150,6 @@ class MoskitkaProfile(BaseModel):
     detail_qty: Optional[int] = None
     izd_part: Optional[str] = None  # Часть изделия
     part_side: Optional[str] = None  # Сторона изделия
-    angle1: Optional[float] = None  # Угол начала (ANG1)
-    angle2: Optional[float] = None  # Угол конца (ANG2)
-    model_width: Optional[int] = None  # Ширина изделия из MODELS
-    model_height: Optional[int] = None  # Высота изделия из MODELS
-    flugel_count: Optional[int] = None  # Число створок из MODELS
     
     # Данные товара
     goods_group_name: Optional[str] = None

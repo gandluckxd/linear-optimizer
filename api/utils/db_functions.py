@@ -5,7 +5,7 @@
 import fdb
 from modules.config import DB_CONFIG, ENABLE_LOGGING
 from modules.models import Profile, Stock, MoskitkaProfile, StockRemainder, StockMaterial, GrordersMos, OptimizedMos, OptDetailMos
-from typing import List
+from typing import List, Dict, Any
 
 def get_db_connection():
     """
@@ -455,11 +455,6 @@ def get_moskitka_profiles(grorder_ids: List[int]) -> List[MoskitkaProfile]:
             itd.QTY as DETAIL_QTY,
             itd.IZDPART,
             itd.PARTSIDE,
-            itd.ANG1,
-            itd.ANG2,
-            m.MODELWIDTH as MODEL_WIDTH,
-            m.MODELHEIGHT as MODEL_HEIGHT,
-            m.FLUGELCOUNT as MODEL_FLUGELCOUNT,
             gg.NAME as GOODS_GROUP_NAME,
             gg.MARKING as GROUP_MARKING,
             g.MARKING as GOODS_MARKING,
@@ -476,7 +471,6 @@ def get_moskitka_profiles(grorder_ids: List[int]) -> List[MoskitkaProfile]:
         LEFT JOIN GOODS g ON itd.GOODSID = g.GOODSID
         LEFT JOIN R_PROFILS p ON g.MARKING = p.MARKING AND p.RSYSTEMID = 27
         LEFT JOIN R_PROFPARTS pp ON p.PROFPARTID = pp.PARTID
-        LEFT JOIN MODELS m ON m.ORDERITEMSID = oi.ORDERITEMSID AND m.MODELNO = itd.MODELNO
         WHERE grd.GRORDERID IN ({placeholders})
           AND gg.DELETED = 0
           AND (g.DELETED = 0 OR g.DELETED IS NULL)
@@ -506,20 +500,15 @@ def get_moskitka_profiles(grorder_ids: List[int]) -> List[MoskitkaProfile]:
                 detail_qty=row[13],
                 izd_part=row[14],
                 part_side=row[15],
-                angle1=row[16],
-                angle2=row[17],
-                model_width=row[18],
-                model_height=row[19],
-                flugel_count=row[20],
-                goods_group_name=row[21],
-                group_marking=row[22],
-                goods_marking=row[23],
-                profil_name=row[24],
-                part_type=row[25],
-                length_prof=row[26],
-                width_prof=row[27],
-                thick_prof=row[28],
-                total_length_needed=row[29]
+                goods_group_name=row[16],
+                group_marking=row[17],
+                goods_marking=row[18],
+                profil_name=row[19],
+                part_type=row[20],
+                length_prof=row[21],
+                width_prof=row[22],
+                thick_prof=row[23],
+                total_length_needed=row[24]
             )
             profiles.append(profile)
         
@@ -534,6 +523,283 @@ def get_moskitka_profiles(grorder_ids: List[int]) -> List[MoskitkaProfile]:
         raise
     
     return profiles
+
+def enrich_optdetail_mos_fields(
+    *,
+    optimized_mos_id: int,
+    orderid: int,
+    itemlong: float | None = None,
+    itemsdetailid: int | None = None,
+    ug1: float | None = None,
+    ug2: float | None = None,
+    izdpart: str | None = None,
+    partside: str | None = None,
+    modelno: int | None = None,
+    modelheight: int | None = None,
+    modelwidth: int | None = None,
+    flugelopentype: int | None = None,
+    flugelcount: int | None = None,
+    ishandle: int | None = None,
+    handlepos: float | None = None,
+    handleposfalts: float | None = None,
+    flugelopentag: str | None = None,
+) -> Dict[str, Any]:
+    """
+    Обогатить поля OPTDETAIL_MOS на основании данных из БД, без модификации вставки.
+    Возвращает словарь с теми же ключами, но с заполненными значениями там, где это возможно.
+    """
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        # Узнаем GOODSID по текущему OPTIMIZED_MOS
+        goods_id_for_bar = None
+        try:
+            cur.execute(
+                "SELECT GOODSID, GRORDER_MOS_ID FROM OPTIMIZED_MOS WHERE OPTIMIZED_MOS_ID = ?",
+                (optimized_mos_id,),
+            )
+            row_goods = cur.fetchone()
+            goods_id_for_bar = int(row_goods[0]) if row_goods and row_goods[0] is not None else None
+            grorders_mos_id = int(row_goods[1]) if row_goods and row_goods[1] is not None else None
+        except Exception:
+            goods_id_for_bar = None
+            grorders_mos_id = None
+
+        # 1) Пробуем найти ITEMSDETAIL для данного заказа и материала (или по длине)
+        try:
+            if itemsdetailid is None:
+                # 1.1) Сначала трактуем orderid как GRORDERID (для MOS это верно)
+                if orderid and goods_id_for_bar:
+                    target_length = float(itemlong or 0)
+                    cur.execute(
+                        (
+                            "SELECT FIRST 1 itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, itd.MODELNO, "
+                            "oi.WIDTH AS O_WIDTH, oi.HEIGHT AS O_HEIGHT, itd.WIDTH AS D_WIDTH, itd.HEIGHT AS D_HEIGHT, itd.THICK "
+                            "FROM GRORDERSDETAIL grd "
+                            "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = grd.ORDERITEMSID "
+                            "JOIN ITEMSDETAIL itd ON itd.ORDERITEMSID = oi.ORDERITEMSID "
+                            "WHERE grd.GRORDERID = ? AND itd.GOODSID = ? "
+                            "ORDER BY ABS(COALESCE(itd.THICK, 0) - ?) ASC, itd.ITEMSDETAILID DESC"
+                        ),
+                        (int(orderid), goods_id_for_bar, target_length),
+                    )
+                    cand_gr = cur.fetchone()
+                    if cand_gr:
+                        itemsdetailid = int(cand_gr[0])
+                        if ug1 is None:
+                            ug1 = float(cand_gr[1]) if cand_gr[1] is not None else None
+                        if ug2 is None:
+                            ug2 = float(cand_gr[2]) if cand_gr[2] is not None else None
+                        # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART
+                        # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART (только если источник не пустой)
+                        if (izdpart is None or (isinstance(izdpart, str) and izdpart.strip() == "")) and (cand_gr[4] is not None and str(cand_gr[4]).strip() != ""):
+                            izdpart = cand_gr[4]
+                        if (partside is None or (isinstance(partside, str) and partside.strip() == "")) and (cand_gr[3] is not None and str(cand_gr[3]).strip() != ""):
+                            partside = cand_gr[3]
+                        if modelno is None:
+                            modelno = int(cand_gr[5]) if cand_gr[5] is not None else None
+                        if modelwidth is None:
+                            modelwidth = int(cand_gr[6]) if cand_gr[6] is not None else (int(cand_gr[8]) if cand_gr[8] is not None else None)
+                        if modelheight is None:
+                            modelheight = int(cand_gr[7]) if cand_gr[7] is not None else (int(cand_gr[9]) if cand_gr[9] is not None else None)
+
+                if orderid and goods_id_for_bar:
+                    target_length = float(itemlong or 0)
+                    cur.execute(
+                        (
+                            "SELECT FIRST 1 itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, "
+                            "itd.MODELNO, oi.WIDTH AS O_WIDTH, oi.HEIGHT AS O_HEIGHT, itd.WIDTH AS D_WIDTH, itd.HEIGHT AS D_HEIGHT, itd.THICK "
+                            "FROM ITEMSDETAIL itd "
+                            "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = itd.ORDERITEMSID "
+                            "WHERE oi.ORDERID = ? AND (itd.GOODSID = ?) "
+                            "ORDER BY ABS(COALESCE(itd.THICK, 0) - ?) ASC, itd.ITEMSDETAILID DESC"
+                        ),
+                        (orderid, goods_id_for_bar, target_length),
+                    )
+                    cand = cur.fetchone()
+                    if cand:
+                        itemsdetailid = int(cand[0])
+                        if ug1 is None:
+                            ug1 = float(cand[1]) if cand[1] is not None else None
+                        if ug2 is None:
+                            ug2 = float(cand[2]) if cand[2] is not None else None
+                        # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART
+                        if (izdpart is None or (isinstance(izdpart, str) and izdpart.strip() == "")) and (cand[4] is not None and str(cand[4]).strip() != ""):
+                            izdpart = cand[4]
+                        if (partside is None or (isinstance(partside, str) and partside.strip() == "")) and (cand[3] is not None and str(cand[3]).strip() != ""):
+                            partside = cand[3]
+                        if modelno is None:
+                            modelno = int(cand[5]) if cand[5] is not None else None
+                        # HEIGHT/WIDTH: сперва из ORDERITEMS, затем из ITEMSDETAIL
+                        if modelwidth is None:
+                            modelwidth = int(cand[6]) if cand[6] is not None else (int(cand[8]) if cand[8] is not None else None)
+                        if modelheight is None:
+                            modelheight = int(cand[7]) if cand[7] is not None else (int(cand[9]) if cand[9] is not None else None)
+
+                if itemsdetailid is None and orderid and itemlong is not None:
+                    cur.execute(
+                        (
+                            "SELECT FIRST 1 itd.ITEMSDETAILID FROM ITEMSDETAIL itd "
+                            "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = itd.ORDERITEMSID "
+                            "WHERE oi.ORDERID = ? "
+                            "ORDER BY ABS(COALESCE(itd.THICK, 0) - ?) ASC, itd.ITEMSDETAILID DESC"
+                        ),
+                        (orderid, float(itemlong)),
+                    )
+                    row_fallback = cur.fetchone()
+                    if row_fallback and row_fallback[0] is not None:
+                        itemsdetailid = int(row_fallback[0])
+
+                # MOS-путь: ищем по GRORDER_MOS_ID -> GRORDERID
+                if itemsdetailid is None and goods_id_for_bar is not None and grorders_mos_id is not None:
+                    cur.execute(
+                        "SELECT GRORDERID FROM GRORDER_UF_VALUES WHERE USERFIELDID = 8 AND VAR_STR = ?",
+                        (str(grorders_mos_id),),
+                    )
+                    gr_rows = cur.fetchall() or []
+                    gr_ids = [int(r[0]) for r in gr_rows if r and r[0] is not None]
+                    if gr_ids:
+                        placeholders = ",".join(["?"] * len(gr_ids))
+                        target_length = float(itemlong or 0)
+                        sql = (
+                            "SELECT FIRST 1 itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, itd.MODELNO, "
+                            "oi.WIDTH AS O_WIDTH, oi.HEIGHT AS O_HEIGHT, itd.WIDTH AS D_WIDTH, itd.HEIGHT AS D_HEIGHT "
+                            "FROM GRORDERSDETAIL grd "
+                            "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = grd.ORDERITEMSID "
+                            "JOIN ITEMSDETAIL itd ON itd.ORDERITEMSID = oi.ORDERITEMSID "
+                            f"WHERE grd.GRORDERID IN ({placeholders}) AND itd.GOODSID = ? "
+                            "ORDER BY ABS(COALESCE(itd.THICK, 0) - ?) ASC, itd.ITEMSDETAILID DESC"
+                        )
+                        params = gr_ids + [goods_id_for_bar, target_length]
+                        cur.execute(sql, params)
+                        cand2 = cur.fetchone()
+                        if cand2:
+                            itemsdetailid = int(cand2[0])
+                            if ug1 is None:
+                                ug1 = float(cand2[1]) if cand2[1] is not None else None
+                            if ug2 is None:
+                                ug2 = float(cand2[2]) if cand2[2] is not None else None
+                            # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART
+                            if (izdpart is None or (isinstance(izdpart, str) and izdpart.strip() == "")) and (cand2[4] is not None and str(cand2[4]).strip() != ""):
+                                izdpart = cand2[4]
+                            if (partside is None or (isinstance(partside, str) and partside.strip() == "")) and (cand2[3] is not None and str(cand2[3]).strip() != ""):
+                                partside = cand2[3]
+                            if modelno is None:
+                                modelno = int(cand2[5]) if cand2[5] is not None else None
+                            if modelwidth is None:
+                                modelwidth = int(cand2[6]) if cand2[6] is not None else (int(cand2[8]) if cand2[8] is not None else None)
+                            if modelheight is None:
+                                modelheight = int(cand2[7]) if cand2[7] is not None else (int(cand2[9]) if cand2[9] is not None else None)
+        except Exception as _:
+            pass
+
+        # 2) Дополняем углы/части/стороны и flugel*/handle* из OPTDETAIL / MODELPARTS
+        try:
+            if itemsdetailid is not None:
+                # 2.0) Если UG1/UG2/IZDPART/PARTSIDE ещё пустые — возьмём из OPTDETAIL
+                need_fill_angles_parts = (
+                    ug1 is None
+                    or ug2 is None
+                    or izdpart is None
+                    or (isinstance(izdpart, str) and izdpart.strip() == "")
+                    or partside is None
+                    or (isinstance(partside, str) and partside.strip() == "")
+                )
+                if need_fill_angles_parts:
+                    cur.execute(
+                        (
+                            "SELECT FIRST 1 UG1, UG2, IZDPART, PARTSIDE "
+                            "FROM OPTDETAIL WHERE ITEMSDETAILID = ? ORDER BY OPTDETAILID DESC"
+                        ),
+                        (itemsdetailid,),
+                    )
+                    od_angles = cur.fetchone()
+                    if od_angles:
+                        if ug1 is None:
+                            ug1 = od_angles[0]
+                        if ug2 is None:
+                            ug2 = od_angles[1]
+                        # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART (только если источник не пустой)
+                        if (izdpart is None or (isinstance(izdpart, str) and izdpart.strip() == "")) and (od_angles[3] is not None and str(od_angles[3]).strip() != ""):
+                            izdpart = od_angles[3]
+                        if (partside is None or (isinstance(partside, str) and partside.strip() == "")) and (od_angles[2] is not None and str(od_angles[2]).strip() != ""):
+                            partside = od_angles[2]
+
+                if (
+                    flugelopentype is None
+                    or flugelcount is None
+                    or ishandle is None
+                    or handlepos is None
+                    or handleposfalts is None
+                    or flugelopentag is None
+                ):
+                    cur.execute(
+                        (
+                            "SELECT FIRST 1 FLUGELOPENTYPE, FLUGELCOUNT, ISHANDLE, HANDLEPOS, HANDLEPOSFALTS, FLUGELOPENTAG "
+                            "FROM OPTDETAIL WHERE ITEMSDETAILID = ? ORDER BY OPTDETAILID DESC"
+                        ),
+                        (itemsdetailid,),
+                    )
+                    od = cur.fetchone()
+                    if od:
+                        if flugelopentype is None:
+                            flugelopentype = od[0]
+                        if flugelcount is None:
+                            flugelcount = od[1]
+                        if ishandle is None:
+                            ishandle = od[2]
+                        if handlepos is None:
+                            handlepos = od[3]
+                        if handleposfalts is None:
+                            handleposfalts = od[4]
+                        if flugelopentag is None:
+                            flugelopentag = od[5]
+
+                if flugelopentype is None or flugelopentag is None:
+                    cur.execute(
+                        "SELECT MODELPARTID FROM ITEMSDETAIL WHERE ITEMSDETAILID = ?",
+                        (itemsdetailid,),
+                    )
+                    mp = cur.fetchone()
+                    modelpartid = mp[0] if mp else None
+                    if modelpartid is not None:
+                        cur.execute(
+                            (
+                                "SELECT FLUGELOPENTYPE, FLUGELOPENTAG FROM MODELPARTS WHERE PARTID = ?"
+                            ),
+                            (modelpartid,),
+                        )
+                        mpd = cur.fetchone()
+                        if mpd:
+                            if flugelopentype is None:
+                                flugelopentype = mpd[0]
+                            if flugelopentag is None:
+                                flugelopentag = mpd[1]
+        except Exception as _:
+            pass
+
+        con.close()
+    except Exception as e:
+        if ENABLE_LOGGING:
+            print(f"Предупреждение: enrich_optdetail_mos_fields не удалось полностью: {e}")
+
+    return {
+        "itemsdetailid": itemsdetailid,
+        "ug1": ug1,
+        "ug2": ug2,
+        "izdpart": izdpart,
+        "partside": partside,
+        "modelno": modelno,
+        "modelheight": modelheight,
+        "modelwidth": modelwidth,
+        "flugelopentype": flugelopentype,
+        "flugelcount": flugelcount,
+        "ishandle": ishandle,
+        "handlepos": handlepos,
+        "handleposfalts": handleposfalts,
+        "flugelopentag": flugelopentag,
+    }
 
 def test_db_connection():
     """
