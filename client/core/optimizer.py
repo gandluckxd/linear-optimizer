@@ -20,8 +20,11 @@ class OptimizationSettings:
     min_remainder_length: float = 300.0   # Минимальная длина остатка в мм
     max_waste_percent: float = 15.0       # Максимальный процент отходов
     pair_optimization: bool = True        # Парная оптимизация
-    use_remainders: bool = True          # Использовать остатки
-    time_limit_seconds: int = 60         # Лимит времени
+    use_remainders: bool = True           # Использовать остатки
+    time_limit_seconds: int = 60          # Лимит времени
+    begin_indent: float = 10.0            # Отступ от начала (мм)
+    end_indent: float = 10.0              # Отступ от конца (мм)
+    min_trash_mm: float = 50.0            # Минимальный отход (мм)
 
 
 class SimpleOptimizer:
@@ -152,13 +155,21 @@ class SimpleOptimizer:
                     'id': f"{stock.id}_{i+1}",
                     'original_id': stock.id,
                     'length': stock.length,
+                    'is_remainder': bool(getattr(stock, 'is_remainder', False)),
                     'used_length': 0,
                     'cuts': [],
-                    'cuts_count': 0
+                    'cuts_count': 0,
+                    'original_stock': stock  # Сохраняем ссылку на исходный хлыст
                 })
         
-        # Сортируем хлысты по длине (сначала короткие, чтобы использовать их полностью)
-        available_stocks.sort(key=lambda x: x['length'])
+        # Фильтруем/сортируем хлысты в зависимости от использования деловых остатков
+        if not self.settings.use_remainders:
+            # Полностью исключаем остатки из рассмотрения
+            available_stocks = [s for s in available_stocks if not bool(s.get('is_remainder'))]
+            available_stocks.sort(key=lambda x: x['length'])
+        else:
+            # Используем и остатки, и материалы — остатки приоритетнее
+            available_stocks.sort(key=lambda x: (0 if x.get('is_remainder') else 1, x['length']))
         
         # Размещаем куски с улучшенным алгоритмом
         placed_count = 0
@@ -176,10 +187,12 @@ class SimpleOptimizer:
                 if stock['cuts_count'] > 0:
                     needed_length += self.settings.blade_width
                 
+                # Эффективная длина с учетом отступов
+                effective_length = max(0, stock['length'] - (self.settings.begin_indent + self.settings.end_indent))
                 # Проверяем помещается ли
-                if stock['used_length'] + needed_length <= stock['length']:
+                if stock['used_length'] + needed_length <= effective_length:
                     # Рассчитываем отходы после размещения
-                    remaining_length = stock['length'] - (stock['used_length'] + needed_length)
+                    remaining_length = effective_length - (stock['used_length'] + needed_length)
                     
                     # Дополнительная проверка: создаем временный план для валидации
                     temp_cuts = stock['cuts'].copy()
@@ -199,8 +212,16 @@ class SimpleOptimizer:
                     
                     # Проверяем, что план корректен
                     if temp_plan.validate(self.settings.blade_width):
-                        # Приоритет: минимальные отходы, но не менее min_remainder_length
-                        if remaining_length < best_waste:
+                        # Учитываем минимальный отход и лимит на процент отходов
+                        violates_min_trash = (remaining_length > 0 and remaining_length < self.settings.min_trash_mm)
+                        waste_percent_if_place = (remaining_length / stock['length'] * 100) if stock['length'] > 0 else 0
+                        violates_waste_limit = (
+                            remaining_length > 0
+                            and remaining_length < self.settings.min_remainder_length
+                            and waste_percent_if_place > self.settings.max_waste_percent
+                        )
+                        # Приоритет: минимальные отходы, без нарушения min_trash и лимита отходов
+                        if not violates_min_trash and not violates_waste_limit and remaining_length < best_waste:
                             # Если остаток меньше минимального - это хорошо (полное использование)
                             if remaining_length < self.settings.min_remainder_length:
                                 best_stock = stock
@@ -226,11 +247,13 @@ class SimpleOptimizer:
         if progress_fn:
             progress_fn(70)
         
-        # Второй проход: пытаемся заполнить остатки мелкими деталями
-        self._fill_remainders_with_small_pieces(pieces_to_place, available_stocks, progress_fn)
-        
-        # Третий проход: оптимизация размещения комбинаций
-        self._optimize_combinations(available_stocks, progress_fn)
+        # Дополнительные проходы: выполняем только при включенной парной оптимизации
+        if self.settings.pair_optimization:
+            # Второй проход: пытаемся заполнить остатки мелкими деталями
+            self._fill_remainders_with_small_pieces(pieces_to_place, available_stocks, progress_fn)
+            
+            # Третий проход: оптимизация размещения комбинаций
+            self._optimize_combinations(available_stocks, progress_fn)
         
         # Создаем планы распила
         for stock in available_stocks:
@@ -259,7 +282,8 @@ class SimpleOptimizer:
                 else:
                     cut_plans.append(cut_plan)
         
-        return cut_plans
+        # Группируем идентичные планы в один с полем count
+        return self._group_identical_plans(cut_plans)
     
     def _fill_remainders_with_small_pieces(self, all_pieces: List[Dict], available_stocks: List[Dict], progress_fn=None):
         """
@@ -507,15 +531,30 @@ class SimpleOptimizer:
         
         # Рассчитываем правильную использованную длину
         used_length = temp_plan.get_used_length(self.settings.blade_width)
-        waste = stock['length'] - used_length
+        # Эффективная длина с учетом отступов
+        effective_length = max(0, stock['length'] - (self.settings.begin_indent + self.settings.end_indent))
+        waste_or_remainder = max(0, effective_length - used_length)
+        waste = waste_or_remainder
         remainder = None
         
         # Проверяем остаток
-        if waste >= self.settings.min_remainder_length:
-            remainder = waste
+        if waste_or_remainder >= self.settings.min_remainder_length:
+            remainder = waste_or_remainder
             waste = 0
+        else:
+            # Минимальный отход: допускаем, но стараемся избегать в выборе
+            pass
         
         waste_percent = (waste / stock['length'] * 100) if stock['length'] > 0 else 0
+        
+        # Получаем значение is_remainder из исходного хлыста
+        is_remainder_value = bool(stock.get('is_remainder', False))
+        
+        # Отладочная информация
+        print(f"🔧 DEBUG: Создаю CutPlan для хлыста {stock['original_id']}")
+        print(f"   Длина: {stock['length']}мм")
+        print(f"   is_remainder: {is_remainder_value}")
+        print(f"   Количество распилов: {len(stock['cuts'])}")
         
         return CutPlan(
             stock_id=stock['original_id'],
@@ -523,7 +562,9 @@ class SimpleOptimizer:
             cuts=stock['cuts'].copy(),
             waste=waste,
             waste_percent=waste_percent,
-            remainder=remainder
+            remainder=remainder,
+            count=1,
+            is_remainder=is_remainder_value
         )
     
     def _calculate_stats(self, cut_plans: List[CutPlan]) -> Dict[str, Any]:
@@ -709,6 +750,25 @@ class SimpleOptimizer:
             traceback.print_exc()
             return []
 
+    def _group_identical_plans(self, cut_plans: List[CutPlan]) -> List[CutPlan]:
+        """Группирует идентичные планы (одинаковые длина и набор распилов, и тип хлыста)"""
+        def cuts_signature(cuts: List[Dict]) -> tuple:
+            normalized = []
+            for c in cuts:
+                if isinstance(c, dict):
+                    normalized.append((int(c.get('profile_id', 0) or 0), float(c.get('length', 0) or 0), int(c.get('quantity', 0) or 0)))
+            normalized.sort()
+            return tuple(normalized)
+
+        groups: Dict[tuple, CutPlan] = {}
+        for plan in cut_plans:
+            key = (float(plan.stock_length), cuts_signature(plan.cuts), bool(getattr(plan, 'is_remainder', False)))
+            if key in groups:
+                groups[key].count += getattr(plan, 'count', 1)
+            else:
+                groups[key] = plan
+                groups[key].count = getattr(plan, 'count', 1)
+        return list(groups.values())
 
 class LinearOptimizer:
     """
@@ -717,13 +777,21 @@ class LinearOptimizer:
     
     def __init__(self, settings=None):
         if settings:
-            self.settings = OptimizationSettings(
-                blade_width=getattr(settings, 'blade_width', 5.0),
-                min_remainder_length=getattr(settings, 'min_remainder_length', 300.0),
-                max_waste_percent=getattr(settings, 'max_waste_percent', 15.0),
-                pair_optimization=getattr(settings, 'pair_optimization', True),
-                use_remainders=getattr(settings, 'use_remainders', True)
-            )
+            if isinstance(settings, OptimizationSettings):
+                self.settings = settings
+            else:
+                # Обратная совместимость со "старыми" объектами настроек
+                self.settings = OptimizationSettings(
+                    blade_width=getattr(settings, 'blade_width', 5.0),
+                    min_remainder_length=getattr(settings, 'min_remainder_length', 300.0),
+                    max_waste_percent=getattr(settings, 'max_waste_percent', 15.0),
+                    pair_optimization=getattr(settings, 'pair_optimization', True),
+                    use_remainders=getattr(settings, 'use_remainders', True),
+                    time_limit_seconds=getattr(settings, 'time_limit_seconds', 60),
+                    begin_indent=getattr(settings, 'begin_indent', 10.0),
+                    end_indent=getattr(settings, 'end_indent', 10.0),
+                    min_trash_mm=getattr(settings, 'min_trash_mm', 50.0),
+                )
         else:
             self.settings = OptimizationSettings()
         
@@ -736,16 +804,24 @@ class LinearOptimizer:
         """
         print(f"🔧 LinearOptimizer.optimize вызван с {len(profiles)} профилями и {len(stocks)} хлыстами")
         
-        # Обновляем настройки если переданы
+        # Обновляем настройки если переданы (берем напрямую из GUI)
         current_settings = self.settings
         if settings:
-            current_settings = OptimizationSettings(
-                blade_width=getattr(settings, 'blade_width', self.settings.blade_width),
-                min_remainder_length=getattr(settings, 'min_remainder_length', self.settings.min_remainder_length),
-                max_waste_percent=getattr(settings, 'max_waste_percent', self.settings.max_waste_percent),
-                pair_optimization=getattr(settings, 'pair_optimization', self.settings.pair_optimization),
-                use_remainders=getattr(settings, 'use_remainders', self.settings.use_remainders)
-            )
+            if isinstance(settings, OptimizationSettings):
+                current_settings = settings
+            else:
+                # Обратная совместимость: соберем полный набор полей
+                current_settings = OptimizationSettings(
+                    blade_width=getattr(settings, 'blade_width', self.settings.blade_width),
+                    min_remainder_length=getattr(settings, 'min_remainder_length', self.settings.min_remainder_length),
+                    max_waste_percent=getattr(settings, 'max_waste_percent', self.settings.max_waste_percent),
+                    pair_optimization=getattr(settings, 'pair_optimization', self.settings.pair_optimization),
+                    use_remainders=getattr(settings, 'use_remainders', self.settings.use_remainders),
+                    time_limit_seconds=getattr(settings, 'time_limit_seconds', self.settings.time_limit_seconds),
+                    begin_indent=getattr(settings, 'begin_indent', self.settings.begin_indent),
+                    end_indent=getattr(settings, 'end_indent', self.settings.end_indent),
+                    min_trash_mm=getattr(settings, 'min_trash_mm', self.settings.min_trash_mm),
+                )
         
         return self.optimizer.optimize(profiles, stocks, current_settings, progress_fn)
 

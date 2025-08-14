@@ -378,9 +378,9 @@ class LinearOptimizerWindow(QMainWindow):
         # Поля ввода и загрузки
         input_layout = QHBoxLayout()
         
-        input_layout.addWidget(QLabel("ID сменных заданий:"))
+        input_layout.addWidget(QLabel("Идентификатор сменного задания москитных сеток:"))
         self.order_id_input = QLineEdit()
-        self.order_id_input.setPlaceholderText("Введите ID через запятую (например: 30074, 30075, 30076)")
+        self.order_id_input.setPlaceholderText("Введите grorders_mos_id (целое число)")
         self.order_id_input.setMinimumWidth(300)
         self.order_id_input.setMaximumWidth(400)
         input_layout.addWidget(self.order_id_input)
@@ -478,6 +478,27 @@ class LinearOptimizerWindow(QMainWindow):
         self.min_remainder_length.setValue(300)  # По умолчанию 300
         self.min_remainder_length.setSuffix(" мм")
         layout.addRow("Минимальный остаток:", self.min_remainder_length)
+
+        # Минимальный отход (мм)
+        self.min_trash_mm = QSpinBox()
+        self.min_trash_mm.setRange(0, 1000)
+        self.min_trash_mm.setValue(50)
+        self.min_trash_mm.setSuffix(" мм")
+        layout.addRow("Минимальный отход:", self.min_trash_mm)
+
+        # Отступ от начала (begin indent)
+        self.begin_indent = QSpinBox()
+        self.begin_indent.setRange(0, 1000)
+        self.begin_indent.setValue(10)
+        self.begin_indent.setSuffix(" мм")
+        layout.addRow("Отступ от начала:", self.begin_indent)
+
+        # Отступ от конца (end indent)
+        self.end_indent = QSpinBox()
+        self.end_indent.setRange(0, 1000)
+        self.end_indent.setValue(10)
+        self.end_indent.setSuffix(" мм")
+        layout.addRow("Отступ от конца:", self.end_indent)
         
         # Максимальный отход
         self.max_waste_percent = QSpinBox()
@@ -607,16 +628,15 @@ class LinearOptimizerWindow(QMainWindow):
         stats_layout.addLayout(right_layout)
         layout.addLayout(stats_layout)
         
-        # Кнопка загрузки данных в Altawin
+        # Кнопка загрузки данных в Altawin (MOS)
         upload_layout = QHBoxLayout()
         upload_layout.addStretch()
-        
-        self.upload_to_altawin_button = QPushButton("📤 Загрузить результаты в Altawin")
-        self.upload_to_altawin_button.setStyleSheet(SPECIAL_BUTTON_STYLES["upload"])
-        self.upload_to_altawin_button.clicked.connect(self.on_save_results)
-        self.upload_to_altawin_button.setEnabled(False)
-        
-        upload_layout.addWidget(self.upload_to_altawin_button)
+        self.upload_mos_to_altawin_button = QPushButton("📤 Загрузить данные в Altawin (MOS)")
+        self.upload_mos_to_altawin_button.setStyleSheet(SPECIAL_BUTTON_STYLES["upload"])
+        self.upload_mos_to_altawin_button.clicked.connect(self.on_upload_mos_clicked)
+        self.upload_mos_to_altawin_button.setEnabled(False)
+
+        upload_layout.addWidget(self.upload_mos_to_altawin_button)
         upload_layout.addStretch()
         
         layout.addLayout(upload_layout)
@@ -629,23 +649,23 @@ class LinearOptimizerWindow(QMainWindow):
         """Обработчик загрузки данных с API"""
         order_ids_text = self.order_id_input.text().strip()
         if not order_ids_text:
-            QMessageBox.warning(self, "Ошибка", "Введите ID сменных заданий")
+            QMessageBox.warning(self, "Ошибка", "Введите grorders_mos_id")
             return
-        
-        # Парсим ID заказов
+
+        # Получаем список grorderid по введенному grorders_mos_id через API
         try:
-            order_ids = []
-            for order_id_str in order_ids_text.split(','):
-                order_id = order_id_str.strip()
-                if order_id:
-                    order_ids.append(int(order_id))
-            
-            if not order_ids:
-                QMessageBox.warning(self, "Ошибка", "Не найдено валидных ID заказов")
-                return
-                
+            mos_id = int(order_ids_text)
         except ValueError:
-            QMessageBox.warning(self, "Ошибка", "ID заказов должны быть числами, разделенными запятыми")
+            QMessageBox.warning(self, "Ошибка", "grorders_mos_id должен быть целым числом")
+            return
+
+        try:
+            grorder_ids = self.api_client.get_grorders_by_mos_id(mos_id)
+            if not grorder_ids:
+                QMessageBox.warning(self, "Данные не найдены", "По указанному grorders_mos_id не найдено связанных grorderid")
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось получить grorderid: {str(e)}")
             return
         
         # Блокируем кнопку
@@ -662,7 +682,7 @@ class LinearOptimizerWindow(QMainWindow):
             self.data_load_thread.wait()
         
         # Создаем и настраиваем новый поток загрузки
-        self.data_load_thread = DataLoadThread(self.api_client, order_ids)
+        self.data_load_thread = DataLoadThread(self.api_client, grorder_ids)
         
         # Подключаем сигналы потока к методам главного окна
         self.data_load_thread.debug_step.connect(self._add_debug_step_safe)
@@ -687,7 +707,7 @@ class LinearOptimizerWindow(QMainWindow):
             QMessageBox.warning(self, "Предупреждение", "Нет данных о хлыстах на складе")
             return
         
-        print(f"🔧 DEBUG: Запуск оптимизации с {len(self.profiles)} профилями и {len(self.stocks)} хлыстами")
+        print(f"🔧 DEBUG: Запуск оптимизации с {len(self.profiles)} профилями и {len(self.stocks)} хлыстами (до фильтра)")
         
         # Блокируем кнопку
         self.optimize_button.setEnabled(False)
@@ -700,10 +720,22 @@ class LinearOptimizerWindow(QMainWindow):
         # Собираем параметры оптимизации
         self.current_settings.blade_width = self.blade_width.value()
         self.current_settings.min_remainder_length = self.min_remainder_length.value()
+        self.current_settings.min_trash_mm = self.min_trash_mm.value()
+        self.current_settings.begin_indent = self.begin_indent.value()
+        self.current_settings.end_indent = self.end_indent.value()
         self.current_settings.max_waste_percent = self.max_waste_percent.value()
         self.current_settings.pair_optimization = self.pair_optimization.isChecked()
         self.current_settings.use_remainders = self.use_remainders.isChecked()
         
+        # Формируем список хлыстов согласно настройке использования остатков
+        stocks_for_optimization = self.stocks
+        try:
+            if not self.current_settings.use_remainders:
+                stocks_for_optimization = [s for s in self.stocks if not bool(getattr(s, 'is_remainder', False))]
+        except Exception:
+            stocks_for_optimization = self.stocks
+        print(f"🔧 DEBUG: К оптимизации передано {len(stocks_for_optimization)} хлыстов (use_remainders={self.current_settings.use_remainders})")
+
         # Останавливаем предыдущий поток если он еще работает
         if self.optimization_thread and self.optimization_thread.isRunning():
             self.optimization_thread.terminate()
@@ -713,7 +745,7 @@ class LinearOptimizerWindow(QMainWindow):
         self.optimization_thread = OptimizationThread(
             self.optimizer, 
             self.profiles, 
-            self.stocks, 
+            stocks_for_optimization, 
             self.current_settings
         )
         
@@ -727,61 +759,7 @@ class LinearOptimizerWindow(QMainWindow):
         # Запускаем поток
         self.optimization_thread.start()
 
-    def on_save_results(self):
-        """Сохранение результатов в Altawin"""
-        if not self.optimization_result:
-            QMessageBox.warning(self, "Предупреждение", "Нет результатов для сохранения")
-            return
-        
-        # Парсим ID заказов
-        order_ids_text = self.order_id_input.text().strip()
-        order_ids = []
-        if order_ids_text:
-            for order_id_str in order_ids_text.split(','):
-                order_id = order_id_str.strip()
-                if order_id and order_id.isdigit():
-                    order_ids.append(int(order_id))
-        
-        if not order_ids:
-            QMessageBox.warning(self, "Ошибка", "Не найдено ID заказов для сохранения")
-            return
-        
-        # Диалог подтверждения
-        order_info = f"Заказ {order_ids[0]}" if len(order_ids) == 1 else f"Заказы {', '.join(map(str, order_ids))}"
-        reply = QMessageBox.question(
-            self, 
-            "Подтверждение сохранения", 
-            f"Вы точно хотите сохранить результаты оптимизации в Altawin?\n\n"
-            f"{order_info}\n"
-            f"Количество хлыстов: {len(self.optimization_result.cut_plans)}\n"
-            f"Эффективность: {100 - self.optimization_result.get_statistics()['waste_percent']:.1f}%",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            try:
-                # Сохраняем результаты для каждого заказа
-                success_count = 0
-                for order_id in order_ids:
-                    success = self.api_client.upload_optimization_result(
-                        order_id,
-                        self.optimization_result
-                    )
-                    if success:
-                        success_count += 1
-                
-                if success_count == len(order_ids):
-                    QMessageBox.information(self, "Успех", f"Результаты успешно сохранены для всех {len(order_ids)} заказов")
-                    self.status_bar.showMessage(f"Результаты сохранены для {success_count} заказов")
-                elif success_count > 0:
-                    QMessageBox.warning(self, "Частичный успех", f"Результаты сохранены для {success_count} из {len(order_ids)} заказов")
-                    self.status_bar.showMessage(f"Результаты сохранены для {success_count} заказов")
-                else:
-                    QMessageBox.critical(self, "Ошибка", "Не удалось сохранить результаты ни для одного заказа")
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Ошибка сохранения: {str(e)}")
+
 
     def on_save_settings_clicked(self):
         """Сохранение текущих параметров оптимизации"""
@@ -918,8 +896,8 @@ class LinearOptimizerWindow(QMainWindow):
             else:
                 print("⚠️ Нет планов распила для отображения")
             
-            # Активируем кнопку загрузки в Altawin
-            self.upload_to_altawin_button.setEnabled(True)
+            # Активируем кнопку загрузки в Altawin (MOS)
+            self.upload_mos_to_altawin_button.setEnabled(True)
             
             # Переключаемся на вкладку результатов
             self.tabs.setCurrentIndex(1)
@@ -1005,11 +983,71 @@ class LinearOptimizerWindow(QMainWindow):
         clear_table(self.stock_materials_table)
         clear_table(self.results_table)
         self.optimization_result = None
-        self.upload_to_altawin_button.setEnabled(False)
+        self.upload_mos_to_altawin_button.setEnabled(False)
         self.optimize_button.setEnabled(False)
         self.order_info_label.setText("<заказ не загружен>")
         self.status_bar.showMessage("Готов к работе")
         self.tabs.setCurrentIndex(0)
+
+    def on_upload_mos_clicked(self):
+        """Загрузка данных оптимизации в OPTIMIZED_MOS/OPTDETAIL_MOS"""
+        if not self.optimization_result:
+            QMessageBox.warning(self, "Предупреждение", "Нет результатов для сохранения")
+            return
+
+        order_ids_text = self.order_id_input.text().strip()
+        try:
+            grorders_mos_id = int(order_ids_text)
+        except ValueError:
+            QMessageBox.warning(self, "Ошибка", "grorders_mos_id должен быть целым числом")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение загрузки (MOS)",
+            (
+                "Вы точно хотите загрузить данные оптимизации в таблицы MOS?\n\n"
+                f"GRORDERS_MOS_ID: {grorders_mos_id}\n"
+                f"Планов распила: {len(self.optimization_result.cut_plans)}"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            # Используем текущие параметры распила из UI
+            blade_width = int(self.blade_width.value())
+            min_remainder = int(self.min_remainder_length.value())
+
+            self.status_bar.showMessage("Загрузка MOS данных...")
+            self.upload_mos_to_altawin_button.setEnabled(False)
+
+            ok = self.api_client.upload_mos_data(
+                grorders_mos_id=grorders_mos_id,
+                result=self.optimization_result,
+                profiles=self.profiles,
+                blade_width_mm=blade_width,
+                min_remainder_mm=min_remainder,
+                begin_indent_mm=int(self.begin_indent.value()),
+                end_indent_mm=int(self.end_indent.value()),
+                min_trash_mm=int(self.min_trash_mm.value()),
+            )
+
+            if ok:
+                QMessageBox.information(self, "Успех", "Данные успешно загружены в OPTIMIZED_MOS и OPTDETAIL_MOS")
+                self.status_bar.showMessage("MOS данные успешно загружены")
+            else:
+                QMessageBox.warning(self, "Предупреждение", "Данные MOS не были загружены")
+                self.status_bar.showMessage("Не удалось загрузить MOS данные")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка загрузки MOS: {str(e)}")
+            self.status_bar.showMessage("Ошибка загрузки MOS данных")
+        finally:
+            self.upload_mos_to_altawin_button.setEnabled(True)
     
     def show_optimization_settings(self):
         """Показать настройки оптимизации"""

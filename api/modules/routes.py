@@ -10,7 +10,8 @@ from modules.models import (
     StockRemainderRequest, StockMaterialRequest, StockRemainder, StockMaterial,
     GrordersMosCreate, GrordersMos,
     OptimizedMosCreate, OptimizedMos,
-    OptDetailMosCreate, OptDetailMos
+    OptDetailMosCreate, OptDetailMos,
+    GrordersByMosIdRequest
 )
 from utils.db_functions import (
     get_profiles_for_order,
@@ -21,7 +22,10 @@ from utils.db_functions import (
     get_stock_materials,
     insert_grorders_mos,
     insert_optimized_mos,
-    insert_optdetail_mos
+    insert_optdetail_mos,
+    get_grorder_ids_by_grorders_mos_id,
+    delete_grorders_mos
+    ,delete_optimized_mos_by_grorders_mos_id
 )
 
 router = APIRouter()
@@ -63,6 +67,22 @@ async def upload_result(request: UploadRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.delete("/optimized-mos/by-grorders-mos-id/{grorders_mos_id}")
+async def delete_optimized_mos_by_grorders_mos_id_endpoint(grorders_mos_id: int):
+    """
+    Удалить все записи из OPTIMIZED_MOS и OPTDETAIL_MOS, связанные с GRORDER_MOS_ID
+    """
+    try:
+        success = delete_optimized_mos_by_grorders_mos_id(grorders_mos_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Записи не найдены")
+        return {"status": "success", "message": "Записи успешно удалены"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/stock-remainders", response_model=List[StockRemainder])
 async def get_stock_remainders_endpoint(request: StockRemainderRequest):
     """
@@ -97,6 +117,17 @@ async def get_moskitka_profiles_endpoint(request: MoskitkaRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/grorders-by-mos-id", response_model=List[int])
+async def get_grorders_by_mos_id_endpoint(request: GrordersByMosIdRequest):
+    """
+    Получить список grorderid по идентификатору сменного задания москитных сеток (grorders_mos_id)
+    """
+    try:
+        ids = get_grorder_ids_by_grorders_mos_id(request.grorders_mos_id)
+        return ids
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/optimize")
 async def optimize_profiles(request: dict):
     """
@@ -124,12 +155,17 @@ async def optimize_profiles(request: dict):
         if not order_id:
             raise HTTPException(status_code=400, detail="order_id обязателен")
         
-        # Настройки оптимизации (можно получать из запроса)
+        # Настройки оптимизации: берем из запроса, без лишних полей
         settings = OptimizationSettings(
             blade_width=request.get('blade_width', 5.0),
             min_remainder_length=request.get('min_remainder_length', 300.0),
-            time_limit_seconds=request.get('time_limit', 300),
-            solver_type=SolverType.CP_SAT  # Используем лучший алгоритм
+            max_waste_percent=request.get('max_waste_percent', 15.0),
+            pair_optimization=bool(request.get('pair_optimization', True)),
+            use_remainders=bool(request.get('use_remainders', True)),
+            time_limit_seconds=request.get('time_limit_seconds', request.get('time_limit', 300)),
+            begin_indent=request.get('begin_indent', 10.0),
+            end_indent=request.get('end_indent', 10.0),
+            min_trash_mm=request.get('min_trash_mm', 50.0),
         )
         
         # Получаем профили для распила
@@ -277,6 +313,22 @@ async def create_optdetail_mos(request: OptDetailMosCreate):
             flugelopentag=request.flugelopentag,
         )
         return created
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/grorders-mos/{grorders_mos_id}")
+async def delete_grorders_mos_endpoint(grorders_mos_id: int):
+    """
+    Удалить запись из таблицы GRORDERS_MOS по ID
+    """
+    try:
+        success = delete_grorders_mos(grorders_mos_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Запись не найдена")
+        return {"status": "success", "message": "Запись успешно удалена"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

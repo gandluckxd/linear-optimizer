@@ -55,9 +55,11 @@ class CutPlan:
     stock_id: int
     stock_length: float
     cuts: List[Dict]  # [{profile_id, length, quantity}]
-    waste: float  # Отход в мм
-    waste_percent: float  # Процент отхода
+    waste: float  # Отход в мм на один хлыст
+    waste_percent: float  # Процент отхода на один хлыст
     remainder: Optional[float] = None  # Остаток (если >= min_remainder)
+    count: int = 1  # Количество одинаковых хлыстов с этим планом
+    is_remainder: bool = False  # Признак, что исходный хлыст был остатком
     
     def get_used_length(self, saw_width: float = 5.0) -> float:
         """Получить использованную длину с учетом пропилов"""
@@ -135,13 +137,13 @@ class OptimizationResult:
     def get_statistics(self) -> Dict:
         """Получить статистику оптимизации"""
         try:
-            total_stocks = len(self.cut_plans) if self.cut_plans else 0
+            total_stocks = sum(getattr(plan, 'count', 1) for plan in self.cut_plans) if self.cut_plans else 0
             total_cuts = 0
             total_length = 0.0
             
             for plan in self.cut_plans:
-                total_cuts += plan.get_cuts_count()
-                total_length += plan.stock_length
+                total_cuts += plan.get_cuts_count() * getattr(plan, 'count', 1)
+                total_length += plan.stock_length * getattr(plan, 'count', 1)
             
             return {
                 'total_stocks': total_stocks,

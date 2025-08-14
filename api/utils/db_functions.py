@@ -89,6 +89,44 @@ def get_profiles_for_order(order_id: int) -> List[Profile]:
     
     return profiles
 
+def get_grorder_ids_by_grorders_mos_id(grorders_mos_id: int) -> List[int]:
+    """
+    Получить список GRORDERID по идентификатору сменного задания москитных сеток (GRORDERS_MOS_ID).
+
+    Логика: связь хранится в таблице GRORDER_UF_VALUES по userfieldid = 8 и var_str = grorders_mos_id.
+    """
+    grorder_ids: List[int] = []
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        sql = (
+            "SELECT gruv.GRORDERID "
+            "FROM GRORDER_UF_VALUES gruv "
+            "WHERE gruv.USERFIELDID = 8 AND gruv.VAR_STR = ?"
+        )
+
+        # Приводим к строке, т.к. столбец VAR_STR текстовый
+        cur.execute(sql, (str(grorders_mos_id),))
+        rows = cur.fetchall()
+
+        for row in rows:
+            if row and row[0] is not None:
+                grorder_ids.append(int(row[0]))
+
+        con.close()
+
+        if ENABLE_LOGGING:
+            print(
+                f"✅ Получено {len(grorder_ids)} GRORDERID по GRORDERS_MOS_ID={grorders_mos_id}: {grorder_ids}"
+            )
+    except Exception as e:
+        if ENABLE_LOGGING:
+            print(f"❌ Ошибка получения GRORDERID по GRORDERS_MOS_ID={grorders_mos_id}: {e}")
+        raise
+
+    return grorder_ids
+
 def get_stock_for_profile(profile_id: int) -> List[Stock]:
     """
     Получить остатки профиля на складе
@@ -313,11 +351,14 @@ def save_optimization_result(optimization_result, save_to_order: bool, create_cu
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             
-            # Формируем карту распила (MAP) - простое текстовое представление
-            cut_map = "; ".join([
-                f"{cut['quantity']}x{cut['length']}мм" 
-                for cut in plan.cuts
-            ])
+            # Формируем карту распила для OPTIMIZED.MAP: список длин с одним десятичным знаком, через ';'
+            pieces = []
+            for cut in plan.cuts:
+                length_val = float(cut['length']) if cut.get('length') else 0.0
+                qty_val = int(cut['quantity']) if cut.get('quantity') else 0
+                for _ in range(max(0, qty_val)):
+                    pieces.append(f"{length_val:.1f}")
+            cut_map = ";".join(pieces)
             
             cur.execute(insert_optdata_sql, (
                 optimization_result.order_id,  # SHIFTTASKSID (ID сменного задания)
@@ -414,6 +455,11 @@ def get_moskitka_profiles(grorder_ids: List[int]) -> List[MoskitkaProfile]:
             itd.QTY as DETAIL_QTY,
             itd.IZDPART,
             itd.PARTSIDE,
+            itd.ANG1,
+            itd.ANG2,
+            m.MODELWIDTH as MODEL_WIDTH,
+            m.MODELHEIGHT as MODEL_HEIGHT,
+            m.FLUGELCOUNT as MODEL_FLUGELCOUNT,
             gg.NAME as GOODS_GROUP_NAME,
             gg.MARKING as GROUP_MARKING,
             g.MARKING as GOODS_MARKING,
@@ -430,6 +476,7 @@ def get_moskitka_profiles(grorder_ids: List[int]) -> List[MoskitkaProfile]:
         LEFT JOIN GOODS g ON itd.GOODSID = g.GOODSID
         LEFT JOIN R_PROFILS p ON g.MARKING = p.MARKING AND p.RSYSTEMID = 27
         LEFT JOIN R_PROFPARTS pp ON p.PROFPARTID = pp.PARTID
+        LEFT JOIN MODELS m ON m.ORDERITEMSID = oi.ORDERITEMSID AND m.MODELNO = itd.MODELNO
         WHERE grd.GRORDERID IN ({placeholders})
           AND gg.DELETED = 0
           AND (g.DELETED = 0 OR g.DELETED IS NULL)
@@ -459,15 +506,20 @@ def get_moskitka_profiles(grorder_ids: List[int]) -> List[MoskitkaProfile]:
                 detail_qty=row[13],
                 izd_part=row[14],
                 part_side=row[15],
-                goods_group_name=row[16],
-                group_marking=row[17],
-                goods_marking=row[18],
-                profil_name=row[19],
-                part_type=row[20],
-                length_prof=row[21],
-                width_prof=row[22],
-                thick_prof=row[23],
-                total_length_needed=row[24]
+                angle1=row[16],
+                angle2=row[17],
+                model_width=row[18],
+                model_height=row[19],
+                flugel_count=row[20],
+                goods_group_name=row[21],
+                group_marking=row[22],
+                goods_marking=row[23],
+                profil_name=row[24],
+                part_type=row[25],
+                length_prof=row[26],
+                width_prof=row[27],
+                thick_prof=row[28],
+                total_length_needed=row[29]
             )
             profiles.append(profile)
         
@@ -745,4 +797,73 @@ def insert_optdetail_mos(
             pass
         if ENABLE_LOGGING:
             print(f"Ошибка вставки в OPTDETAIL_MOS: {e}")
+        raise
+
+
+def delete_grorders_mos(grorders_mos_id: int) -> bool:
+    """
+    Удалить запись из GRORDERS_MOS по ID. Возвращает True, если запись удалена.
+    """
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        con.begin()
+        cur.execute("DELETE FROM GRORDERS_MOS WHERE ID = ?", (grorders_mos_id,))
+        affected = cur.rowcount if hasattr(cur, "rowcount") else None
+        con.commit()
+        con.close()
+
+        return bool(affected) if affected is not None else True
+    except Exception as e:
+        try:
+            con.rollback()
+        except:
+            pass
+        if ENABLE_LOGGING:
+            print(f"Ошибка удаления из GRORDERS_MOS: {e}")
+        raise
+
+
+def delete_optimized_mos_by_grorders_mos_id(grorders_mos_id: int) -> bool:
+    """
+    Удалить все записи из OPTIMIZED_MOS по GRORDER_MOS_ID.
+    Дополнительно удаляет связанные записи из OPTDETAIL_MOS, чтобы избежать конфликтов внешних ключей.
+    Возвращает True, если удаление прошло успешно.
+    """
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        con.begin()
+
+        # Сначала удаляем детали, связанные с optimized_mos для указанного grorders_mos_id
+        cur.execute(
+            """
+            DELETE FROM OPTDETAIL_MOS
+            WHERE OPTIMIZED_MOS_ID IN (
+                SELECT OPTIMIZED_MOS_ID FROM OPTIMIZED_MOS WHERE GRORDER_MOS_ID = ?
+            )
+            """,
+            (grorders_mos_id,),
+        )
+
+        # Затем удаляем сами optimized_mos
+        cur.execute(
+            "DELETE FROM OPTIMIZED_MOS WHERE GRORDER_MOS_ID = ?",
+            (grorders_mos_id,),
+        )
+        affected = cur.rowcount if hasattr(cur, "rowcount") else None
+
+        con.commit()
+        con.close()
+
+        return bool(affected) if affected is not None else True
+    except Exception as e:
+        try:
+            con.rollback()
+        except:
+            pass
+        if ENABLE_LOGGING:
+            print(f"Ошибка удаления из OPTIMIZED_MOS по GRORDER_MOS_ID={grorders_mos_id}: {e}")
         raise

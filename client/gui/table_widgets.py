@@ -229,7 +229,9 @@ def fill_optimization_results_table(table: QTableWidget, cut_plans: list):
             remainder_length = remainder if remainder and remainder > 0 else 0
             remainder_percent = (remainder_length / plan.stock_length * 100) if plan.stock_length > 0 and remainder_length > 0 else 0
             
-            table.setItem(row, 0, _create_text_item(str(plan.stock_id)))
+            # В колонке 0 теперь показываем ID и количество одинаковых хлыстов, если count>1
+            count_text = f"{getattr(plan, 'count', 1)}x" if getattr(plan, 'count', 1) > 1 else ""
+            table.setItem(row, 0, _create_text_item(f"{count_text}{plan.stock_id}"))
             table.setItem(row, 1, _create_numeric_item(plan.stock_length))
             table.setItem(row, 2, _create_text_item(cuts_text))
             table.setItem(row, 3, _create_text_item(waste_display))
@@ -242,6 +244,7 @@ def fill_optimization_results_table(table: QTableWidget, cut_plans: list):
                 f"📊 Детальная информация:",
                 f"Длина хлыста: {plan.stock_length:.0f}мм",
                 f"Количество деталей: {cuts_count}шт",
+                f"Количество одинаковых хлыстов: {getattr(plan, 'count', 1)}",
                 f"Сумма длин деталей: {total_pieces_length:.0f}мм",
                 f"Ширина пропилов: {saw_width_total:.0f}мм",
                 f"Общая использованная длина: {used_length:.0f}мм",
