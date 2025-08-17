@@ -48,6 +48,7 @@ class Stock:
     location: str = ""  # Место хранения
     is_remainder: bool = False  # Является ли остатком
     selected_quantity: int = 0  # Выбрано для распила
+    warehouseremaindersid: Optional[int] = None  # ID делового остатка в таблице WAREHOUSEREMAINDER
 
 @dataclass
 class CutPlan:
@@ -60,6 +61,7 @@ class CutPlan:
     remainder: Optional[float] = None  # Остаток (если >= min_remainder)
     count: int = 1  # Количество одинаковых хлыстов с этим планом
     is_remainder: bool = False  # Признак, что исходный хлыст был остатком
+    warehouseremaindersid: Optional[int] = None  # ID делового остатка в таблице WAREHOUSEREMAINDER
     
     def get_used_length(self, saw_width: float = 5.0) -> float:
         """Получить использованную длину с учетом пропилов"""

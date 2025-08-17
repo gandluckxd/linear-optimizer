@@ -141,6 +141,7 @@ class SimpleOptimizer:
             for i in range(profile.quantity):
                 pieces_to_place.append({
                     'profile_id': profile.id,
+                    'profile_code': profile.profile_code,  # Добавляем артикул профиля
                     'length': profile.length,
                     'element_name': profile.element_name
                 })
@@ -150,15 +151,40 @@ class SimpleOptimizer:
         # Создаем список доступных хлыстов
         available_stocks = []
         for stock in stocks:
-            for i in range(stock.quantity):
+            if stock.is_remainder:
+                # Для деловых остатков создаем отдельный объект для каждого экземпляра
+                for i in range(stock.quantity):
+                    available_stocks.append({
+                        'id': f"{stock.id}_{i+1}",  # Уникальный ID для каждого экземпляра
+                        'original_id': stock.id,
+                        'length': stock.length,
+                        'profile_code': getattr(stock, 'profile_code', None),  # Добавляем артикул профиля хлыста
+                        'warehouseremaindersid': getattr(stock, 'warehouseremaindersid', None),  # Добавляем ID делового остатка
+                        'groupgoods_thick': getattr(stock, 'groupgoods_thick', 6000),  # Добавляем типовой размер профиля
+                        'is_remainder': True,
+                        'used_length': 0,
+                        'cuts': [],
+                        'cuts_count': 0,
+                        'quantity': 1,  # Каждый экземпляр может быть использован только 1 раз
+                        'used_quantity': 0,  # Счетчик использованных хлыстов этого типа
+                        'original_stock': stock,  # Сохраняем ссылку на исходный хлыст
+                        'instance_id': i + 1  # Номер экземпляра
+                    })
+            else:
+                # Для цельных материалов создаем один объект с правильным количеством
                 available_stocks.append({
-                    'id': f"{stock.id}_{i+1}",
+                    'id': stock.id,  # Используем оригинальный ID хлыста
                     'original_id': stock.id,
                     'length': stock.length,
-                    'is_remainder': bool(getattr(stock, 'is_remainder', False)),
+                    'profile_code': getattr(stock, 'profile_code', None),  # Добавляем артикул профиля хлыста
+                    'warehouseremaindersid': None,  # Цельные материалы не имеют warehouseremaindersid
+                    'groupgoods_thick': getattr(stock, 'groupgoods_thick', 6000),  # Добавляем типовой размер профиля
+                    'is_remainder': False,
                     'used_length': 0,
                     'cuts': [],
                     'cuts_count': 0,
+                    'quantity': stock.quantity,  # Сохраняем количество доступных хлыстов
+                    'used_quantity': 0,  # Счетчик использованных хлыстов этого типа
                     'original_stock': stock  # Сохраняем ссылку на исходный хлыст
                 })
         
@@ -181,6 +207,16 @@ class SimpleOptimizer:
             
             # Ищем хлыст с минимальными отходами (Best Fit)
             for stock in available_stocks:
+                # ПРОВЕРКА АРТИКУЛА ПРОФИЛЯ - деталь можно размещать только на хлысте с соответствующим артикулом
+                if stock['profile_code'] and piece['profile_code'] and stock['profile_code'] != piece['profile_code']:
+                    # Артикулы не совпадают - пропускаем этот хлыст
+                    continue
+                
+                # ПРОВЕРКА КОЛИЧЕСТВА - нельзя использовать больше хлыстов, чем есть на складе
+                if stock['used_quantity'] >= stock['quantity']:
+                    # Все хлысты этого типа уже использованы
+                    continue
+                
                 needed_length = piece['length']
                 
                 # Добавляем ширину пропила если уже есть распилы
@@ -198,6 +234,7 @@ class SimpleOptimizer:
                     temp_cuts = stock['cuts'].copy()
                     temp_cuts.append({
                         'profile_id': piece['profile_id'],
+                        'profile_code': piece.get('profile_code', ''),  # Добавляем артикул профиля
                         'length': piece['length'],
                         'quantity': 1
                     })
@@ -237,7 +274,7 @@ class SimpleOptimizer:
                 placed = True
                 placed_count += 1
             else:
-                print(f"⚠️ Не удалось разместить: {piece['element_name']} ({piece['length']}мм)")
+                print(f"⚠️ Не удалось разместить: {piece['element_name']} ({piece['length']}мм, артикул: {piece['profile_code']})")
             
             # Обновляем прогресс реже (каждые 10% кусков)
             if progress_fn and total_pieces > 0 and placed_count % max(1, total_pieces // 10) == 0:
@@ -343,6 +380,11 @@ class SimpleOptimizer:
             available_space = stock_info['remainder']
             
             for piece in unplaced_pieces.copy():
+                # ПРОВЕРКА АРТИКУЛА ПРОФИЛЯ - деталь можно размещать только на хлысте с соответствующим артикулом
+                if stock['profile_code'] and piece['profile_code'] and stock['profile_code'] != piece['profile_code']:
+                    # Артикулы не совпадают - пропускаем эту деталь для данного хлыста
+                    continue
+                
                 needed_length = piece['length'] + self.settings.blade_width  # Всегда добавляем пропил
                 
                 if needed_length <= available_space:
@@ -350,6 +392,7 @@ class SimpleOptimizer:
                     temp_cuts = stock['cuts'].copy()
                     temp_cuts.append({
                         'profile_id': piece['profile_id'],
+                        'profile_code': piece.get('profile_code', ''),  # Добавляем артикул профиля
                         'length': piece['length'],
                         'quantity': 1
                     })
@@ -422,6 +465,11 @@ class SimpleOptimizer:
             # Пытаемся найти лучшую комбинацию с другими хлыстами
             for other_stock in available_stocks:
                 if other_stock['id'] != stock['id'] and other_stock['cuts']:
+                    # ПРОВЕРКА АРТИКУЛА ПРОФИЛЯ - хлысты можно объединять только если у них одинаковый артикул
+                    if stock['profile_code'] and other_stock['profile_code'] and stock['profile_code'] != other_stock['profile_code']:
+                        # Артикулы не совпадают - пропускаем этот хлыст
+                        continue
+                    
                     # Пробуем объединить детали из двух хлыстов в один
                     combined_cuts = stock['cuts'] + other_stock['cuts']
                     combined_length = self._calculate_cuts_length(combined_cuts)
@@ -487,35 +535,59 @@ class SimpleOptimizer:
     
     def _add_piece_to_stock(self, stock: Dict, piece: Dict):
         """Добавляет кусок в хлыст"""
-        # Добавляем длину куска
-        needed_length = piece['length']
-        
-        # Добавляем ширину пропила если уже есть распилы
-        if stock['cuts_count'] > 0:
-            needed_length += self.settings.blade_width
-        
-        # Ищем существующий распил такого же типа
-        existing_cut = None
-        for cut in stock['cuts']:
-            if cut['profile_id'] == piece['profile_id']:
-                existing_cut = cut
-                break
-        
-        if existing_cut:
-            # Увеличиваем количество
-            existing_cut['quantity'] += 1
-        else:
-            # Создаем новый распил
-            stock['cuts'].append({
-                'profile_id': piece['profile_id'],
-                'length': piece['length'],
-                'quantity': 1
-            })
-        
-        # Обновляем использованную длину и счетчик
-        # Используем только needed_length, так как он уже включает ширину пропила
-        stock['used_length'] += needed_length
-        stock['cuts_count'] += 1
+        try:
+            # Добавляем длину куска
+            needed_length = piece['length']
+            
+            # Добавляем ширину пропила если уже есть распилы
+            if stock['cuts_count'] > 0:
+                needed_length += self.settings.blade_width
+            
+            # Проверяем, не превышает ли общая длина длину хлыста
+            effective_length = max(0, stock['length'] - (self.settings.begin_indent + self.settings.end_indent))
+            if stock['used_length'] + needed_length > effective_length:
+                raise ValueError(f"Превышена длина хлыста: {stock['used_length'] + needed_length:.0f}мм > {effective_length:.0f}мм")
+            
+            # Ищем существующий распил такого же типа
+            existing_cut = None
+            for cut in stock['cuts']:
+                if cut['profile_id'] == piece['profile_id'] and cut['length'] == piece['length']:
+                    existing_cut = cut
+                    break
+            
+            if existing_cut:
+                # Увеличиваем количество
+                existing_cut['quantity'] += 1
+            else:
+                # Создаем новый распил
+                stock['cuts'].append({
+                    'profile_id': piece['profile_id'],
+                    'profile_code': piece.get('profile_code', ''),  # Добавляем артикул профиля
+                    'length': piece['length'],
+                    'quantity': 1
+                })
+            
+            # Обновляем использованную длину и счетчик
+            # Используем только needed_length, так как он уже включает ширину пропила
+            stock['used_length'] += needed_length
+            stock['cuts_count'] += 1
+            
+            # Увеличиваем счетчик использованных хлыстов этого типа
+            stock['used_quantity'] += 1
+            
+            # Отладочная информация
+            print(f"🔧 DEBUG: Добавлена деталь {piece['length']}мм в хлыст {stock['id']}")
+            print(f"   Тип: {'Деловой остаток' if stock['is_remainder'] else 'Цельный хлыст'}")
+            print(f"   Использовано хлыстов: {stock['used_quantity']}/{stock['quantity']}")
+            print(f"   Использованная длина: {stock['used_length']:.0f}мм")
+            if stock['is_remainder']:
+                print(f"   Warehouseremaindersid: {stock.get('warehouseremaindersid', 'N/A')}")
+                print(f"   Instance ID: {stock.get('instance_id', 'N/A')}")
+            
+        except Exception as e:
+            print(f"❌ Ошибка в _add_piece_to_stock: {e}")
+            # Возвращаем ошибку вместо остановки оптимизации
+            raise e
     
     def _create_cut_plan_from_stock(self, stock: Dict) -> CutPlan:
         """Создает план распила из заполненного хлыста"""
@@ -550,21 +622,26 @@ class SimpleOptimizer:
         # Получаем значение is_remainder из исходного хлыста
         is_remainder_value = bool(stock.get('is_remainder', False))
         
+        # Получаем warehouseremaindersid из исходного хлыста
+        warehouseremaindersid_value = stock.get('warehouseremaindersid', None)
+        
         # Отладочная информация
         print(f"🔧 DEBUG: Создаю CutPlan для хлыста {stock['original_id']}")
         print(f"   Длина: {stock['length']}мм")
         print(f"   is_remainder: {is_remainder_value}")
+        print(f"   warehouseremaindersid: {warehouseremaindersid_value}")
         print(f"   Количество распилов: {len(stock['cuts'])}")
         
         return CutPlan(
-            stock_id=stock['original_id'],
+            stock_id=stock['id'],  # Используем уникальный ID экземпляра, а не original_id
             stock_length=stock['length'],
             cuts=stock['cuts'].copy(),
             waste=waste,
             waste_percent=waste_percent,
             remainder=remainder,
             count=1,
-            is_remainder=is_remainder_value
+            is_remainder=is_remainder_value,
+            warehouseremaindersid=warehouseremaindersid_value
         )
     
     def _calculate_stats(self, cut_plans: List[CutPlan]) -> Dict[str, Any]:
@@ -658,6 +735,7 @@ class SimpleOptimizer:
                     for i in range(cut['quantity']):
                         pieces_to_redistribute.append({
                             'profile_id': cut['profile_id'],
+                            'profile_code': cut.get('profile_code', ''),  # Добавляем артикул профиля
                             'length': cut['length'],
                             'element_name': f"Переразмещаемая деталь {cut['length']}мм"
                         })

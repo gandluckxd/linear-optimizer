@@ -231,13 +231,36 @@ def fill_optimization_results_table(table: QTableWidget, cut_plans: list):
             
             # В колонке 0 теперь показываем ID и количество одинаковых хлыстов, если count>1
             count_text = f"{getattr(plan, 'count', 1)}x" if getattr(plan, 'count', 1) > 1 else ""
-            table.setItem(row, 0, _create_text_item(f"{count_text}{plan.stock_id}"))
+            
+            # Для деловых остатков показываем warehouseremaindersid, для материалов - stock_id
+            if plan.is_remainder and hasattr(plan, 'warehouseremaindersid') and plan.warehouseremaindersid:
+                stock_display_id = plan.warehouseremaindersid
+            else:
+                stock_display_id = plan.stock_id
+            
+            table.setItem(row, 0, _create_text_item(f"{count_text}{stock_display_id}"))
             table.setItem(row, 1, _create_numeric_item(plan.stock_length))
-            table.setItem(row, 2, _create_text_item(cuts_text))
-            table.setItem(row, 3, _create_text_item(waste_display))
-            table.setItem(row, 4, _create_text_item(waste_percent_display))
-            table.setItem(row, 5, _create_numeric_item(remainder_length))
-            table.setItem(row, 6, _create_text_item(f"{remainder_percent:.1f}%"))
+            
+            # Колонка 2: Артикул профиля (берем из первого распила)
+            profile_code = ""
+            if plan.cuts and len(plan.cuts) > 0:
+                first_cut = plan.cuts[0]
+                if isinstance(first_cut, dict) and 'profile_code' in first_cut:
+                    profile_code = first_cut['profile_code']
+            table.setItem(row, 2, _create_text_item(profile_code))
+            
+            table.setItem(row, 3, _create_text_item(cuts_text))
+            table.setItem(row, 4, _create_text_item(waste_display))
+            table.setItem(row, 5, _create_text_item(waste_percent_display))
+            table.setItem(row, 6, _create_numeric_item(remainder_length))
+            table.setItem(row, 7, _create_text_item(f"{remainder_percent:.1f}%"))
+            
+            # Колонка 8: ID делового остатка (warehouseremaindersid)
+            warehouseremaindersid_value = getattr(plan, 'warehouseremaindersid', None)
+            if warehouseremaindersid_value and plan.is_remainder:
+                table.setItem(row, 8, _create_text_item(f"ID: {warehouseremaindersid_value}"))
+            else:
+                table.setItem(row, 8, _create_text_item(""))
             
             # Создаем детальный tooltip для всех планов
             tooltip_lines = [
@@ -249,6 +272,10 @@ def fill_optimization_results_table(table: QTableWidget, cut_plans: list):
                 f"Ширина пропилов: {saw_width_total:.0f}мм",
                 f"Общая использованная длина: {used_length:.0f}мм",
             ]
+            
+            # Добавляем информацию о деловом остатке
+            if plan.is_remainder and hasattr(plan, 'warehouseremaindersid') and plan.warehouseremaindersid:
+                tooltip_lines.append(f"🏷️ ID делового остатка: {plan.warehouseremaindersid}")
             
             # Добавляем информацию об отходах и остатках
             if remainder and remainder > 0:
@@ -290,11 +317,13 @@ def fill_optimization_results_table(table: QTableWidget, cut_plans: list):
             table.insertRow(row)
             table.setItem(row, 0, _create_text_item("ERROR"))
             table.setItem(row, 1, _create_text_item("ERROR"))
-            table.setItem(row, 2, _create_text_item(f"Ошибка: {str(e)}"))
-            table.setItem(row, 3, _create_text_item("ERROR"))
+            table.setItem(row, 2, _create_text_item("ERROR"))
+            table.setItem(row, 3, _create_text_item(f"Ошибка: {str(e)}"))
             table.setItem(row, 4, _create_text_item("ERROR"))
             table.setItem(row, 5, _create_text_item("ERROR"))
             table.setItem(row, 6, _create_text_item("ERROR"))
+            table.setItem(row, 7, _create_text_item("ERROR"))
+            table.setItem(row, 8, _create_text_item("ERROR"))
     
     # Обновляем размеры столбцов
     table.resizeColumnsToContents()

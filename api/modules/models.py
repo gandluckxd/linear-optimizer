@@ -56,6 +56,7 @@ class Stock(BaseModel):
     quantity: int  # Количество на складе
     location: Optional[str] = None  # Место хранения
     is_remainder: bool = False  # Является ли остатком
+    warehouseremaindersid: Optional[int] = None  # ID делового остатка в таблице WAREHOUSEREMAINDER
 
 class CutPlan(BaseModel):
     """План распила одного хлыста"""
@@ -65,6 +66,7 @@ class CutPlan(BaseModel):
     waste: float  # Отход в мм
     waste_percent: float  # Процент отхода
     remainder: Optional[float] = None  # Остаток (если больше минимального)
+    warehouseremaindersid: Optional[int] = None  # ID делового остатка в таблице WAREHOUSEREMAINDER
     
     def get_used_length(self, saw_width: float = 5.0) -> float:
         """Получить использованную длину с учетом пропилов"""
@@ -200,6 +202,7 @@ class OptimizedMosCreate(BaseModel):
     beginindent: Optional[int] = None
     endindent: Optional[int] = None
     sumtrash: Optional[float] = None
+    warehouseremaindersid: Optional[int] = None  # ID делового остатка в таблице WAREHOUSEREMAINDER
 
 
 class OptimizedMos(BaseModel):
@@ -222,6 +225,7 @@ class OptimizedMos(BaseModel):
     beginindent: Optional[int] = None
     endindent: Optional[int] = None
     sumtrash: Optional[float] = None
+    warehouseremaindersid: Optional[int] = None  # ID делового остатка в таблице WAREHOUSEREMAINDER
 
 
 # Модели для таблицы OPTDETAIL_MOS

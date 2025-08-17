@@ -68,7 +68,8 @@ class APIClient:
                     length=data['length'],
                     quantity=data['quantity'],
                     location=data.get('location', ''),
-                    is_remainder=data.get('is_remainder', False)
+                    is_remainder=data.get('is_remainder', False),
+                    warehouseremaindersid=data.get('warehouseremaindersid', None)
                 )
                 stocks.append(stock)
             
@@ -324,6 +325,7 @@ class APIClient:
                         "beginindent": int(begin_indent_mm or 0),
                         "endindent": int(end_indent_mm or 0),
                         "sumtrash": float(waste) if waste else None,
+                        "warehouseremaindersid": getattr(plan, 'warehouseremaindersid', None),
                     }
 
                     optimized_resp = self.create_optimized_mos(optimized_payload)
@@ -371,6 +373,36 @@ class APIClient:
 
         except Exception as e:
             raise Exception(f"Ошибка загрузки данных MOS: {str(e)}")
+
+    def adjust_materials_altawin(self, grorders_mos_id: int, used_materials: list = None, business_remainders: list = None) -> dict:
+        """
+        Скорректировать списание и приход материалов в Altawin для оптимизации москитных сеток
+        
+        Args:
+            grorders_mos_id: ID сменного задания москитных сеток
+            used_materials: Список использованных материалов [{'goodsid': int, 'length': float, 'quantity': int, 'is_remainder': bool}]
+            business_remainders: Список деловых остатков [{'goodsid': int, 'length': float, 'quantity': int}]
+            
+        Returns:
+            dict: Результат операции
+        """
+        try:
+            payload = {
+                "grorders_mos_id": grorders_mos_id,
+                "used_materials": used_materials or [],
+                "business_remainders": business_remainders or []
+            }
+            
+            response = self.session.post(
+                f"{self.base_url}/api/adjust-materials-altawin",
+                json=payload,
+                timeout=60
+            )
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.RequestException as e:
+            raise Exception(f"Ошибка корректировки материалов: {str(e)}")
 
 # Глобальный экземпляр клиента
 _api_client = None

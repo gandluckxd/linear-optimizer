@@ -557,7 +557,7 @@ class LinearOptimizerWindow(QMainWindow):
         
         self.results_table = QTableWidget()
         setup_table_columns(self.results_table, [
-            'Хлыст (ID)', 'Длина хлыста (мм)', 'Распилы', 'Отход (мм)', 'Отход (%)', 'Остаток (мм)', 'Остаток (%)'
+            'Хлыст (ID)', 'Длина хлыста (мм)', 'Артикул профиля', 'Распилы', 'Отход (мм)', 'Отход (%)', 'Остаток (мм)', 'Остаток (%)', 'ID остатка'
         ])
         
         # Включаем сортировку
@@ -631,11 +631,18 @@ class LinearOptimizerWindow(QMainWindow):
         # Кнопка загрузки данных в Altawin (MOS)
         upload_layout = QHBoxLayout()
         upload_layout.addStretch()
+        
+        # Галочка для корректировки материалов в Altawin
+        self.adjust_materials_checkbox = QCheckBox("Скорректировать списание материалов в Altawin")
+        self.adjust_materials_checkbox.setChecked(False)
+        self.adjust_materials_checkbox.setStyleSheet("QCheckBox { color: #e0e0e0; font-weight: bold; }")
+        upload_layout.addWidget(self.adjust_materials_checkbox)
+        
+        # Кнопка загрузки данных в Altawin (MOS)
         self.upload_mos_to_altawin_button = QPushButton("📤 Загрузить данные в Altawin (MOS)")
         self.upload_mos_to_altawin_button.setStyleSheet(SPECIAL_BUTTON_STYLES["upload"])
         self.upload_mos_to_altawin_button.clicked.connect(self.on_upload_mos_clicked)
         self.upload_mos_to_altawin_button.setEnabled(False)
-
         upload_layout.addWidget(self.upload_mos_to_altawin_button)
         upload_layout.addStretch()
         
@@ -820,14 +827,22 @@ class LinearOptimizerWindow(QMainWindow):
             
             # Добавляем остатки
             for remainder in self.stock_remainders:
+                # Используем warehouseremaindersid как уникальный ID для делового остатка
+                # Создаем ОДИН объект Stock с правильным количеством
                 stock = Stock(
-                    id=stock_id,
+                    id=getattr(remainder, 'warehouseremaindersid', stock_id),  # Используем warehouseremaindersid если есть
                     profile_id=1,  # Базовый ID
                     length=remainder.length,
-                    quantity=remainder.quantity_pieces,
+                    quantity=remainder.quantity_pieces,  # Количество палок этого остатка
                     location="Остатки",
                     is_remainder=True
                 )
+                # Добавляем атрибут profile_code для проверки артикулов в оптимизаторе
+                stock.profile_code = remainder.profile_code
+                # Добавляем warehouseremaindersid для отслеживания
+                stock.warehouseremaindersid = getattr(remainder, 'warehouseremaindersid', None)
+                # Добавляем groupgoods_thick для расчета количества в миллиметрах
+                stock.groupgoods_thick = getattr(remainder, 'groupgoods_thick', 6000)
                 self.stocks.append(stock)
                 stock_id += 1
             
@@ -837,10 +852,16 @@ class LinearOptimizerWindow(QMainWindow):
                     id=stock_id,
                     profile_id=1,  # Базовый ID
                     length=material.length,
-                    quantity=material.quantity_pieces,
+                    quantity=material.quantity_pieces,  # Количество палок этого материала
                     location="Материалы",
                     is_remainder=False
                 )
+                # Добавляем атрибут profile_code для проверки артикулов в оптимизаторе
+                stock.profile_code = material.profile_code
+                # Материалы не имеют warehouseremaindersid
+                stock.warehouseremaindersid = None
+                # Добавляем groupgoods_thick для расчета количества в миллиметрах
+                stock.groupgoods_thick = getattr(material, 'groupgoods_thick', 6000)
                 self.stocks.append(stock)
                 stock_id += 1
             
@@ -988,6 +1009,9 @@ class LinearOptimizerWindow(QMainWindow):
         self.order_info_label.setText("<заказ не загружен>")
         self.status_bar.showMessage("Готов к работе")
         self.tabs.setCurrentIndex(0)
+        
+        # Сбрасываем галочку корректировки материалов
+        self.adjust_materials_checkbox.setChecked(False)
 
     def on_upload_mos_clicked(self):
         """Загрузка данных оптимизации в OPTIMIZED_MOS/OPTDETAIL_MOS"""
@@ -1002,14 +1026,24 @@ class LinearOptimizerWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "grorders_mos_id должен быть целым числом")
             return
 
+        # Проверяем, нужно ли корректировать материалы в Altawin
+        adjust_materials = self.adjust_materials_checkbox.isChecked()
+        
+        # Формируем сообщение для подтверждения
+        confirm_message = (
+            "Вы точно хотите загрузить данные оптимизации в таблицы MOS?\n\n"
+            f"GRORDERS_MOS_ID: {grorders_mos_id}\n"
+            f"Планов распила: {len(self.optimization_result.cut_plans)}"
+        )
+        
+        if adjust_materials:
+            confirm_message += "\n\n⚠️ ВНИМАНИЕ: Будет выполнена корректировка списания и прихода материалов в Altawin!"
+            confirm_message += "\nЭто приведет к удалению старых данных и созданию новых документов."
+
         reply = QMessageBox.question(
             self,
             "Подтверждение загрузки (MOS)",
-            (
-                "Вы точно хотите загрузить данные оптимизации в таблицы MOS?\n\n"
-                f"GRORDERS_MOS_ID: {grorders_mos_id}\n"
-                f"Планов распила: {len(self.optimization_result.cut_plans)}"
-            ),
+            confirm_message,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -1018,12 +1052,121 @@ class LinearOptimizerWindow(QMainWindow):
             return
 
         try:
+            self.status_bar.showMessage("Загрузка MOS данных...")
+            self.upload_mos_to_altawin_button.setEnabled(False)
+
+            # Если включена галочка корректировки материалов, выполняем её первой
+            if adjust_materials:
+                try:
+                    self.status_bar.showMessage("Корректировка материалов в Altawin...")
+                    
+                    # Формируем данные об использованных материалах и деловых остатках
+                    used_materials = []
+                    business_remainders = []
+                    
+                    # Анализируем результаты оптимизации
+                    for plan in self.optimization_result.cut_plans:
+                        # Получаем информацию о хлысте
+                        stock_length = getattr(plan, 'stock_length', 0)
+                        is_remainder = getattr(plan, 'is_remainder', False)
+                        warehouseremaindersid = getattr(plan, 'warehouseremaindersid', None)
+                        
+                        # Определяем goodsid (используем profile_id из первого распила)
+                        goodsid = None
+                        if plan.cuts and len(plan.cuts) > 0:
+                            goodsid = plan.cuts[0].get('profile_id')
+                        
+                        if goodsid:
+                            # Для загрузки в outlaydetail количество должно быть в миллиметрах
+                            # Получаем groupgoods.thick для этого профиля
+                            profile_code = None
+                            if plan.cuts and len(plan.cuts) > 0:
+                                profile_code = plan.cuts[0].get('profile_code')
+                            
+                            # Ищем профиль по profile_code для получения groupgoods_thick
+                            groupgoods_thick = 6000  # По умолчанию 6000 мм
+                            if profile_code:
+                                for profile in self.profiles:
+                                    if profile.profile_code == profile_code:
+                                        # Получаем groupgoods_thick из профиля (если есть)
+                                        groupgoods_thick = getattr(profile, 'groupgoods_thick', 6000)
+                                        break
+                            
+                            # Добавляем использованный материал
+                            if is_remainder and warehouseremaindersid:
+                                # Это деловой остаток - количество = 1 штука (один экземпляр)
+                                quantity_in_pieces = 1  # Один экземпляр делового остатка
+                                print(f"🔧 DEBUG: Деловой остаток {warehouseremaindersid}: quantity={quantity_in_pieces}шт (1 экземпляр)")
+                            else:
+                                # Это цельный хлыст - количество = 1 штука (один хлыст)
+                                quantity_in_pieces = 1  # Один хлыст
+                                print(f"🔧 DEBUG: Цельный хлыст: quantity={quantity_in_pieces}шт (1 хлыст)")
+                            
+                            used_materials.append({
+                                'goodsid': goodsid,
+                                'length': stock_length,
+                                'quantity': quantity_in_pieces,  # Количество в штуках для outlaydetail
+                                'is_remainder': is_remainder,
+                                'groupgoods_thick': groupgoods_thick,  # Добавляем для отладки
+                                'warehouseremaindersid': warehouseremaindersid  # Добавляем для отладки
+                            })
+                        
+                        # Добавляем деловой остаток, если он есть
+                        remainder = getattr(plan, 'remainder', None)
+                        if remainder and remainder > 0 and goodsid:
+                            business_remainders.append({
+                                'goodsid': goodsid,
+                                'length': remainder,
+                                'quantity': 1
+                            })
+                    
+                    print(f"🔧 DEBUG: Сформировано {len(used_materials)} использованных материалов и {len(business_remainders)} деловых остатков")
+                    
+                    # Отладочная информация о формировании used_materials
+                    print(f"🔧 DEBUG: Детализация used_materials:")
+                    for material in used_materials:
+                        print(f"   goodsid={material['goodsid']}, length={material['length']}, quantity={material['quantity']}шт, groupgoods_thick={material.get('groupgoods_thick', 'N/A')}, is_remainder={material.get('is_remainder', False)}, warehouseremaindersid={material.get('warehouseremaindersid', 'N/A')}")
+                    
+                    result = self.api_client.adjust_materials_altawin(
+                        grorders_mos_id, 
+                        used_materials, 
+                        business_remainders
+                    )
+                    
+                    if result.get('success'):
+                        deleted_outlay = result.get('deleted_outlay_count', 0)
+                        deleted_supply = result.get('deleted_supply_count', 0)
+                        outlay_id = result.get('outlay_id')
+                        supply_id = result.get('supply_id')
+                        
+                        self.status_bar.showMessage(f"Материалы скорректированы: удалено {deleted_outlay + deleted_supply} записей")
+                        
+                        # Показываем информацию о созданных документах
+                        info_msg = (
+                            f"Материалы успешно скорректированы!\n\n"
+                            f"Удалено записей из списаний: {deleted_outlay}\n"
+                            f"Удалено записей из приходов: {deleted_supply}\n"
+                            f"Создано новое списание: {outlay_id}\n"
+                            f"Создан новый приход: {supply_id}\n\n"
+                            f"Добавлено материалов в списание: {len(used_materials)}\n"
+                            f"Добавлено деловых остатков в приход: {len(business_remainders)}"
+                        )
+                        QMessageBox.information(self, "Корректировка материалов", info_msg)
+                    else:
+                        error_msg = result.get('error', 'Неизвестная ошибка')
+                        QMessageBox.warning(self, "Предупреждение", f"Корректировка материалов не выполнена: {error_msg}")
+                        return
+                        
+                except Exception as e:
+                    QMessageBox.critical(self, "Ошибка", f"Ошибка корректировки материалов: {str(e)}")
+                    self.status_bar.showMessage("Ошибка корректировки материалов")
+                    return
+
             # Используем текущие параметры распила из UI
             blade_width = int(self.blade_width.value())
             min_remainder = int(self.min_remainder_length.value())
 
             self.status_bar.showMessage("Загрузка MOS данных...")
-            self.upload_mos_to_altawin_button.setEnabled(False)
 
             ok = self.api_client.upload_mos_data(
                 grorders_mos_id=grorders_mos_id,
@@ -1037,7 +1180,11 @@ class LinearOptimizerWindow(QMainWindow):
             )
 
             if ok:
-                QMessageBox.information(self, "Успех", "Данные успешно загружены в OPTIMIZED_MOS и OPTDETAIL_MOS")
+                success_msg = "Данные успешно загружены в OPTIMIZED_MOS и OPTDETAIL_MOS"
+                if adjust_materials:
+                    success_msg += "\n\nМатериалы в Altawin также были скорректированы"
+                
+                QMessageBox.information(self, "Успех", success_msg)
                 self.status_bar.showMessage("MOS данные успешно загружены")
             else:
                 QMessageBox.warning(self, "Предупреждение", "Данные MOS не были загружены")

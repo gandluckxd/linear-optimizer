@@ -278,6 +278,7 @@ async def create_optimized_mos(request: OptimizedMosCreate):
             beginindent=request.beginindent,
             endindent=request.endindent,
             sumtrash=request.sumtrash,
+            warehouseremaindersid=request.warehouseremaindersid,
         )
         return created
     except Exception as e:
@@ -354,6 +355,32 @@ async def delete_grorders_mos_endpoint(grorders_mos_id: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/adjust-materials-altawin")
+async def adjust_materials_altawin(request: dict):
+    """
+    Скорректировать списание и приход материалов в Altawin для оптимизации москитных сеток
+    """
+    try:
+        from utils.db_functions import adjust_materials_for_moskitka_optimization
+        
+        grorders_mos_id = request.get('grorders_mos_id')
+        if not grorders_mos_id:
+            raise HTTPException(status_code=400, detail="grorders_mos_id обязателен")
+        
+        # Получаем данные об использованных материалах и деловых остатках
+        used_materials = request.get('used_materials', [])  # Список использованных материалов
+        business_remainders = request.get('business_remainders', [])  # Список деловых остатков
+        
+        result = adjust_materials_for_moskitka_optimization(
+            grorders_mos_id, 
+            used_materials, 
+            business_remainders
+        )
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка корректировки материалов: {str(e)}")
 
 @router.get("/test-connection")
 async def test_connection():
