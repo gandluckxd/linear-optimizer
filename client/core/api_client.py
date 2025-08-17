@@ -190,43 +190,66 @@ class APIClient:
     def delete_optimized_mos_by_grorders_mos_id(self, grorders_mos_id: int) -> bool:
         """Удалить все записи OPTIMIZED_MOS/OPTDETAIL_MOS по GRORDER_MOS_ID"""
         try:
+            print(f"🔧 API Client: Удаление данных MOS для grorders_mos_id={grorders_mos_id}")
+            
             response = self.session.delete(
                 f"{self.base_url}/api/optimized-mos/by-grorders-mos-id/{grorders_mos_id}",
-                timeout=30,
+                timeout=30
             )
-            # 200 - удалено; 404 - записей не было (это не ошибка для нас)
-            if response.status_code in (200, 204, 404):
+            
+            if response.status_code == 200:
+                print(f"✅ API Client: Данные MOS успешно удалены для grorders_mos_id={grorders_mos_id}")
                 return True
-            # Иные коды считаем ошибкой
-            response.raise_for_status()
-            return True
+            elif response.status_code == 404:
+                print(f"⚠️ API Client: Данные MOS не найдены для grorders_mos_id={grorders_mos_id} (возможно, уже удалены)")
+                return True  # Считаем успехом, если данных нет
+            else:
+                print(f"❌ API Client: Ошибка удаления данных MOS: HTTP {response.status_code}")
+                response.raise_for_status()
+                return True
+                
         except requests.RequestException as e:
+            print(f"❌ API Client: Ошибка удаления данных MOS: {str(e)}")
             raise Exception(f"Ошибка удаления данных MOS: {str(e)}")
 
     def create_optimized_mos(self, payload: Dict) -> Dict:
         """Создать запись в OPTIMIZED_MOS"""
         try:
+            print(f"🔧 API Client: Отправка запроса создания OPTIMIZED_MOS: grorder_mos_id={payload.get('grorder_mos_id')}, goodsid={payload.get('goodsid')}")
+            
             response = self.session.post(
                 f"{self.base_url}/api/optimized-mos",
                 json=payload,
                 timeout=30
             )
             response.raise_for_status()
-            return response.json()
+            
+            result = response.json()
+            print(f"✅ API Client: OPTIMIZED_MOS создан успешно: id={result.get('id')}")
+            return result
+            
         except requests.RequestException as e:
+            print(f"❌ API Client: Ошибка создания OPTIMIZED_MOS: {str(e)}")
             raise Exception(f"Ошибка создания OPTIMIZED_MOS: {str(e)}")
 
     def create_optdetail_mos(self, payload: Dict) -> Dict:
         """Создать запись в OPTDETAIL_MOS"""
         try:
+            print(f"🔧 API Client: Отправка запроса создания OPTDETAIL_MOS: optimized_mos_id={payload.get('optimized_mos_id')}, orderid={payload.get('orderid')}")
+            
             response = self.session.post(
                 f"{self.base_url}/api/optdetail-mos",
                 json=payload,
                 timeout=30
             )
             response.raise_for_status()
-            return response.json()
+            
+            result = response.json()
+            print(f"✅ API Client: OPTDETAIL_MOS создан успешно: id={result.get('id')}")
+            return result
+            
         except requests.RequestException as e:
+            print(f"❌ API Client: Ошибка создания OPTDETAIL_MOS: {str(e)}")
             raise Exception(f"Ошибка создания OPTDETAIL_MOS: {str(e)}")
 
     def upload_mos_data(
@@ -252,6 +275,9 @@ class APIClient:
             isbar: Признак ISBAR
         """
         try:
+            print(f"🔧 API Client: Начало загрузки данных оптимизации для grorders_mos_id={grorders_mos_id}")
+            print(f"🔧 API Client: Количество планов распила: {len(result.cut_plans) if result.cut_plans else 0}")
+            
             if not result or not getattr(result, 'cut_plans', None):
                 raise Exception("Нет данных оптимизации для выгрузки")
 
@@ -260,14 +286,24 @@ class APIClient:
             for p in profiles:
                 # В наших профилях id = goodsid, order_id = grorderid
                 goodsid_to_orderid[int(p.id)] = int(p.order_id)
+            
+            print(f"🔧 API Client: Создан маппинг goodsid->orderid для {len(goodsid_to_orderid)} профилей")
 
             # Очистка предыдущих данных для текущего сменного задания
+            print(f"🔧 API Client: Очистка предыдущих данных для grorders_mos_id={grorders_mos_id}")
             self.delete_optimized_mos_by_grorders_mos_id(grorders_mos_id)
+            print(f"✅ API Client: Предыдущие данные очищены")
 
             # Основная выгрузка
-            for plan in result.cut_plans:
+            total_optimized_mos = 0
+            total_optdetail_mos = 0
+            
+            for plan_index, plan in enumerate(result.cut_plans):
+                print(f"🔧 API Client: Обработка плана {plan_index + 1}/{len(result.cut_plans)}")
+                
                 cuts = plan.cuts or []
                 if not cuts:
+                    print(f"⚠️ API Client: План {plan_index + 1} не содержит распилов, пропускаем")
                     continue
 
                 # Выбираем основной goodsid по большинству кусков в плане
@@ -279,6 +315,8 @@ class APIClient:
                 main_goodsid = 0
                 if goodsid_counter:
                     main_goodsid = max(goodsid_counter.items(), key=lambda x: x[1])[0]
+                
+                print(f"🔧 API Client: Основной goodsid для плана {plan_index + 1}: {main_goodsid}")
 
                 # Формируем карту распила в формате OPTIMIZED.MAP:
                 # последовательность длин (мм) с одним десятичным знаком,
@@ -306,6 +344,8 @@ class APIClient:
                 border_value = int((begin_indent_mm or 0) + (end_indent_mm or 0))
                 plan_count = int(getattr(plan, 'count', 1) or 1)
 
+                print(f"🔧 API Client: Создание {plan_count} записей OPTIMIZED_MOS для плана {plan_index + 1}")
+
                 for bar_index in range(1, plan_count + 1):
                     optimized_payload = {
                         "grorder_mos_id": int(grorders_mos_id),
@@ -325,14 +365,18 @@ class APIClient:
                         "beginindent": int(begin_indent_mm or 0),
                         "endindent": int(end_indent_mm or 0),
                         "sumtrash": float(waste) if waste else None,
-                        "warehouseremaindersid": getattr(plan, 'warehouseremaindersid', None),
                     }
 
+                    print(f"🔧 API Client: Создание OPTIMIZED_MOS {bar_index}/{plan_count} для плана {plan_index + 1}")
                     optimized_resp = self.create_optimized_mos(optimized_payload)
                     optimized_mos_id = int(optimized_resp.get("id"))
+                    total_optimized_mos += 1
+                    print(f"✅ API Client: OPTIMIZED_MOS создан с ID {optimized_mos_id}")
 
                     # Детали распила для текущего хлыста
                     subnum_counter = 1
+                    plan_detail_count = 0
+                    
                     for c in cuts:
                         length_val = float(c.get('length', 0) or 0)
                         qty_val = int(c.get('quantity', 0) or 0)
@@ -366,12 +410,22 @@ class APIClient:
                             "flugelopentag": None,
                         }
 
+                        print(f"🔧 API Client: Создание OPTDETAIL_MOS {subnum_counter} для OPTIMIZED_MOS {optimized_mos_id}")
                         self.create_optdetail_mos(detail_payload)
+                        total_optdetail_mos += 1
+                        plan_detail_count += 1
                         subnum_counter += 1
+                    
+                    print(f"✅ API Client: Создано {plan_detail_count} записей OPTDETAIL_MOS для OPTIMIZED_MOS {optimized_mos_id}")
 
+            print(f"✅ API Client: Загрузка данных завершена успешно!")
+            print(f"✅ API Client: Создано записей OPTIMIZED_MOS: {total_optimized_mos}")
+            print(f"✅ API Client: Создано записей OPTDETAIL_MOS: {total_optdetail_mos}")
+            
             return True
 
         except Exception as e:
+            print(f"❌ API Client: Ошибка загрузки данных MOS: {str(e)}")
             raise Exception(f"Ошибка загрузки данных MOS: {str(e)}")
 
     def adjust_materials_altawin(self, grorders_mos_id: int, used_materials: list = None, business_remainders: list = None) -> dict:
@@ -387,19 +441,37 @@ class APIClient:
             dict: Результат операции
         """
         try:
+            print(f"🔧 API Client: adjust_materials_altawin вызван с параметрами:")
+            print(f"   grorders_mos_id: {grorders_mos_id}")
+            print(f"   used_materials: {len(used_materials) if used_materials else 0} записей")
+            print(f"   business_remainders: {len(business_remainders) if business_remainders else 0} записей")
+            
+            if used_materials:
+                print(f"🔧 API Client: Детализация used_materials:")
+                for i, material in enumerate(used_materials):
+                    print(f"   [{i}] goodsid={material.get('goodsid')}, length={material.get('length')}, quantity={material.get('quantity')}, is_remainder={material.get('is_remainder')}")
+            
+            if business_remainders:
+                print(f"🔧 API Client: Детализация business_remainders:")
+                for i, remainder in enumerate(business_remainders):
+                    print(f"   [{i}] goodsid={remainder.get('goodsid')}, length={remainder.get('length')}, quantity={remainder.get('quantity')}")
+            
             payload = {
                 "grorders_mos_id": grorders_mos_id,
                 "used_materials": used_materials or [],
                 "business_remainders": business_remainders or []
             }
             
+            print(f"🔧 API Client: Отправляем payload на сервер...")
             response = self.session.post(
                 f"{self.base_url}/api/adjust-materials-altawin",
                 json=payload,
                 timeout=60
             )
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            print(f"✅ API Client: Получен ответ от сервера: {result}")
+            return result
             
         except requests.RequestException as e:
             raise Exception(f"Ошибка корректировки материалов: {str(e)}")

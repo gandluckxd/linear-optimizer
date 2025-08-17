@@ -202,7 +202,6 @@ class OptimizedMosCreate(BaseModel):
     beginindent: Optional[int] = None
     endindent: Optional[int] = None
     sumtrash: Optional[float] = None
-    warehouseremaindersid: Optional[int] = None  # ID делового остатка в таблице WAREHOUSEREMAINDER
 
 
 class OptimizedMos(BaseModel):
@@ -225,7 +224,6 @@ class OptimizedMos(BaseModel):
     beginindent: Optional[int] = None
     endindent: Optional[int] = None
     sumtrash: Optional[float] = None
-    warehouseremaindersid: Optional[int] = None  # ID делового остатка в таблице WAREHOUSEREMAINDER
 
 
 # Модели для таблицы OPTDETAIL_MOS

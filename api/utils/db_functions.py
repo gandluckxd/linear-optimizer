@@ -551,6 +551,9 @@ def enrich_optdetail_mos_fields(
     Возвращает словарь с теми же ключами, но с заполненными значениями там, где это возможно.
     """
     try:
+        if ENABLE_LOGGING:
+            print(f"🔧 DB: Обогащение полей OPTDETAIL_MOS для optimized_mos_id={optimized_mos_id}, orderid={orderid}")
+        
         con = get_db_connection()
         cur = con.cursor()
 
@@ -564,7 +567,13 @@ def enrich_optdetail_mos_fields(
             row_goods = cur.fetchone()
             goods_id_for_bar = int(row_goods[0]) if row_goods and row_goods[0] is not None else None
             grorders_mos_id = int(row_goods[1]) if row_goods and row_goods[1] is not None else None
-        except Exception:
+            
+            if ENABLE_LOGGING:
+                print(f"🔧 DB: Найден GOODSID={goods_id_for_bar}, GRORDER_MOS_ID={grorders_mos_id}")
+                
+        except Exception as e:
+            if ENABLE_LOGGING:
+                print(f"⚠️ DB: Не удалось получить GOODSID для optimized_mos_id={optimized_mos_id}: {e}")
             goods_id_for_bar = None
             grorders_mos_id = None
 
@@ -574,6 +583,9 @@ def enrich_optdetail_mos_fields(
                 # 1.1) Сначала трактуем orderid как GRORDERID (для MOS это верно)
                 if orderid and goods_id_for_bar:
                     target_length = float(itemlong or 0)
+                    if ENABLE_LOGGING:
+                        print(f"🔧 DB: Поиск ITEMSDETAIL по GRORDERID={orderid}, GOODSID={goods_id_for_bar}, длина={target_length}")
+                    
                     cur.execute(
                         (
                             "SELECT FIRST 1 itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, itd.MODELNO, "
@@ -605,9 +617,15 @@ def enrich_optdetail_mos_fields(
                             modelwidth = int(cand_gr[6]) if cand_gr[6] is not None else (int(cand_gr[8]) if cand_gr[8] is not None else None)
                         if modelheight is None:
                             modelheight = int(cand_gr[7]) if cand_gr[7] is not None else (int(cand_gr[9]) if cand_gr[9] is not None else None)
+                        
+                        if ENABLE_LOGGING:
+                            print(f"✅ DB: Найден ITEMSDETAIL по GRORDERID: id={itemsdetailid}")
 
                 if orderid and goods_id_for_bar:
                     target_length = float(itemlong or 0)
+                    if ENABLE_LOGGING:
+                        print(f"🔧 DB: Поиск ITEMSDETAIL по ORDERID={orderid}, GOODSID={goods_id_for_bar}, длина={target_length}")
+                    
                     cur.execute(
                         (
                             "SELECT FIRST 1 itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, "
@@ -638,8 +656,14 @@ def enrich_optdetail_mos_fields(
                             modelwidth = int(cand[6]) if cand[6] is not None else (int(cand[8]) if cand[8] is not None else None)
                         if modelheight is None:
                             modelheight = int(cand[7]) if cand[7] is not None else (int(cand[9]) if cand[9] is not None else None)
+                        
+                        if ENABLE_LOGGING:
+                            print(f"✅ DB: Найден ITEMSDETAIL по ORDERID: id={itemsdetailid}")
 
                 if itemsdetailid is None and orderid and itemlong is not None:
+                    if ENABLE_LOGGING:
+                        print(f"🔧 DB: Поиск ITEMSDETAIL только по ORDERID={orderid} и длине={itemlong}")
+                    
                     cur.execute(
                         (
                             "SELECT FIRST 1 itd.ITEMSDETAILID FROM ITEMSDETAIL itd "
@@ -649,159 +673,89 @@ def enrich_optdetail_mos_fields(
                         ),
                         (orderid, float(itemlong)),
                     )
-                    row_fallback = cur.fetchone()
-                    if row_fallback and row_fallback[0] is not None:
-                        itemsdetailid = int(row_fallback[0])
+                    cand_simple = cur.fetchone()
+                    if cand_simple:
+                        itemsdetailid = int(cand_simple[0])
+                        if ENABLE_LOGGING:
+                            print(f"✅ DB: Найден ITEMSDETAIL только по ORDERID: id={itemsdetailid}")
 
-                # MOS-путь: ищем по GRORDER_MOS_ID -> GRORDERID
-                if itemsdetailid is None and goods_id_for_bar is not None and grorders_mos_id is not None:
-                    cur.execute(
-                        "SELECT GRORDERID FROM GRORDER_UF_VALUES WHERE USERFIELDID = 8 AND VAR_STR = ?",
-                        (str(grorders_mos_id),),
-                    )
-                    gr_rows = cur.fetchall() or []
-                    gr_ids = [int(r[0]) for r in gr_rows if r and r[0] is not None]
-                    if gr_ids:
-                        placeholders = ",".join(["?"] * len(gr_ids))
-                        target_length = float(itemlong or 0)
-                        sql = (
-                            "SELECT FIRST 1 itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, itd.MODELNO, "
-                            "oi.WIDTH AS O_WIDTH, oi.HEIGHT AS O_HEIGHT, itd.WIDTH AS D_WIDTH, itd.HEIGHT AS D_HEIGHT "
-                            "FROM GRORDERSDETAIL grd "
-                            "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = grd.ORDERITEMSID "
-                            "JOIN ITEMSDETAIL itd ON itd.ORDERITEMSID = oi.ORDERITEMSID "
-                            f"WHERE grd.GRORDERID IN ({placeholders}) AND itd.GOODSID = ? "
-                            "ORDER BY ABS(COALESCE(itd.THICK, 0) - ?) ASC, itd.ITEMSDETAILID DESC"
-                        )
-                        params = gr_ids + [goods_id_for_bar, target_length]
-                        cur.execute(sql, params)
-                        cand2 = cur.fetchone()
-                        if cand2:
-                            itemsdetailid = int(cand2[0])
-                            if ug1 is None:
-                                ug1 = float(cand2[1]) if cand2[1] is not None else None
-                            if ug2 is None:
-                                ug2 = float(cand2[2]) if cand2[2] is not None else None
-                            # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART
-                            if (izdpart is None or (isinstance(izdpart, str) and izdpart.strip() == "")) and (cand2[4] is not None and str(cand2[4]).strip() != ""):
-                                izdpart = cand2[4]
-                            if (partside is None or (isinstance(partside, str) and partside.strip() == "")) and (cand2[3] is not None and str(cand2[3]).strip() != ""):
-                                partside = cand2[3]
-                            if modelno is None:
-                                modelno = int(cand2[5]) if cand2[5] is not None else None
-                            if modelwidth is None:
-                                modelwidth = int(cand2[6]) if cand2[6] is not None else (int(cand2[8]) if cand2[8] is not None else None)
-                            if modelheight is None:
-                                modelheight = int(cand2[7]) if cand2[7] is not None else (int(cand2[9]) if cand2[9] is not None else None)
-        except Exception as _:
-            pass
+        except Exception as e:
+            if ENABLE_LOGGING:
+                print(f"⚠️ DB: Ошибка поиска ITEMSDETAIL: {e}")
 
-        # 2) Дополняем углы/части/стороны и flugel*/handle* из OPTDETAIL / MODELPARTS
-        try:
-            if itemsdetailid is not None:
-                # 2.0) Если UG1/UG2/IZDPART/PARTSIDE ещё пустые — возьмём из OPTDETAIL
-                need_fill_angles_parts = (
-                    ug1 is None
-                    or ug2 is None
-                    or izdpart is None
-                    or (isinstance(izdpart, str) and izdpart.strip() == "")
-                    or partside is None
-                    or (isinstance(partside, str) and partside.strip() == "")
-                )
-                if need_fill_angles_parts:
+        # 2) Если не нашли ITEMSDETAIL, пробуем заполнить поля по умолчанию
+        if itemsdetailid is None:
+            if ENABLE_LOGGING:
+                print(f"🔧 DB: ITEMSDETAIL не найден, используем значения по умолчанию")
+            
+            # Пытаемся получить информацию о профиле по goods_id_for_bar
+            if goods_id_for_bar:
+                try:
                     cur.execute(
-                        (
-                            "SELECT FIRST 1 UG1, UG2, IZDPART, PARTSIDE "
-                            "FROM OPTDETAIL WHERE ITEMSDETAILID = ? ORDER BY OPTDETAILID DESC"
-                        ),
-                        (itemsdetailid,),
+                        "SELECT FIRST 1 g.marking, gg.thick FROM goods g JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid WHERE g.goodsid = ?",
+                        (goods_id_for_bar,)
                     )
-                    od_angles = cur.fetchone()
-                    if od_angles:
-                        if ug1 is None:
-                            ug1 = od_angles[0]
-                        if ug2 is None:
-                            ug2 = od_angles[1]
-                        # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART (только если источник не пустой)
-                        if (izdpart is None or (isinstance(izdpart, str) and izdpart.strip() == "")) and (od_angles[3] is not None and str(od_angles[3]).strip() != ""):
-                            izdpart = od_angles[3]
-                        if (partside is None or (isinstance(partside, str) and partside.strip() == "")) and (od_angles[2] is not None and str(od_angles[2]).strip() != ""):
-                            partside = od_angles[2]
-
-                if (
-                    flugelopentype is None
-                    or flugelcount is None
-                    or ishandle is None
-                    or handlepos is None
-                    or handleposfalts is None
-                    or flugelopentag is None
-                ):
-                    cur.execute(
-                        (
-                            "SELECT FIRST 1 FLUGELOPENTYPE, FLUGELCOUNT, ISHANDLE, HANDLEPOS, HANDLEPOSFALTS, FLUGELOPENTAG "
-                            "FROM OPTDETAIL WHERE ITEMSDETAILID = ? ORDER BY OPTDETAILID DESC"
-                        ),
-                        (itemsdetailid,),
-                    )
-                    od = cur.fetchone()
-                    if od:
-                        if flugelopentype is None:
-                            flugelopentype = od[0]
-                        if flugelcount is None:
-                            flugelcount = od[1]
-                        if ishandle is None:
-                            ishandle = od[2]
-                        if handlepos is None:
-                            handlepos = od[3]
-                        if handleposfalts is None:
-                            handleposfalts = od[4]
-                        if flugelopentag is None:
-                            flugelopentag = od[5]
-
-                if flugelopentype is None or flugelopentag is None:
-                    cur.execute(
-                        "SELECT MODELPARTID FROM ITEMSDETAIL WHERE ITEMSDETAILID = ?",
-                        (itemsdetailid,),
-                    )
-                    mp = cur.fetchone()
-                    modelpartid = mp[0] if mp else None
-                    if modelpartid is not None:
-                        cur.execute(
-                            (
-                                "SELECT FLUGELOPENTYPE, FLUGELOPENTAG FROM MODELPARTS WHERE PARTID = ?"
-                            ),
-                            (modelpartid,),
-                        )
-                        mpd = cur.fetchone()
-                        if mpd:
-                            if flugelopentype is None:
-                                flugelopentype = mpd[0]
-                            if flugelopentag is None:
-                                flugelopentag = mpd[1]
-        except Exception as _:
-            pass
+                    profile_info = cur.fetchone()
+                    if profile_info:
+                        marking = profile_info[0]
+                        thick = profile_info[1]
+                        if ENABLE_LOGGING:
+                            print(f"🔧 DB: Найден профиль: marking={marking}, thick={thick}")
+                        
+                        # Устанавливаем значения по умолчанию на основе профиля
+                        if modelwidth is None:
+                            modelwidth = int(thick) if thick else None
+                        if modelheight is None:
+                            modelheight = int(thick) if thick else None
+                except Exception as e:
+                    if ENABLE_LOGGING:
+                        print(f"⚠️ DB: Не удалось получить информацию о профиле: {e}")
 
         con.close()
+
+        # Формируем результат
+        result = {
+            "itemsdetailid": itemsdetailid,
+            "ug1": ug1,
+            "ug2": ug2,
+            "izdpart": izdpart,
+            "partside": partside,
+            "modelno": modelno,
+            "modelheight": modelheight,
+            "modelwidth": modelwidth,
+            "flugelopentype": flugelopentype,
+            "flugelcount": flugelcount,
+            "ishandle": ishandle,
+            "handlepos": handlepos,
+            "handleposfalts": handleposfalts,
+            "flugelopentag": flugelopentag,
+        }
+        
+        if ENABLE_LOGGING:
+            print(f"✅ DB: Обогащение полей завершено: itemsdetailid={itemsdetailid}, modelwidth={modelwidth}, modelheight={modelheight}")
+        
+        return result
+
     except Exception as e:
         if ENABLE_LOGGING:
-            print(f"Предупреждение: enrich_optdetail_mos_fields не удалось полностью: {e}")
-
-    return {
-        "itemsdetailid": itemsdetailid,
-        "ug1": ug1,
-        "ug2": ug2,
-        "izdpart": izdpart,
-        "partside": partside,
-        "modelno": modelno,
-        "modelheight": modelheight,
-        "modelwidth": modelwidth,
-        "flugelopentype": flugelopentype,
-        "flugelcount": flugelcount,
-        "ishandle": ishandle,
-        "handlepos": handlepos,
-        "handleposfalts": handleposfalts,
-        "flugelopentag": flugelopentag,
-    }
+            print(f"❌ DB: Ошибка обогащения полей: {e}")
+        # Возвращаем исходные значения в случае ошибки
+        return {
+            "itemsdetailid": itemsdetailid,
+            "ug1": ug1,
+            "ug2": ug2,
+            "izdpart": izdpart,
+            "partside": partside,
+            "modelno": modelno,
+            "modelheight": modelheight,
+            "modelwidth": modelwidth,
+            "flugelopentype": flugelopentype,
+            "flugelcount": flugelcount,
+            "ishandle": ishandle,
+            "handlepos": handlepos,
+            "handleposfalts": handleposfalts,
+            "flugelopentag": flugelopentag,
+        }
 
 def test_db_connection():
     """
@@ -876,7 +830,6 @@ def insert_optimized_mos(
     beginindent: int | None = None,
     endindent: int | None = None,
     sumtrash: float | None = None,
-    warehouseremaindersid: int | None = None,
 ) -> OptimizedMos:
     """
     Вставка записи в OPTIMIZED_MOS. Возвращает созданную запись.
@@ -896,8 +849,8 @@ def insert_optimized_mos(
 
         insert_sql = (
             "INSERT INTO OPTIMIZED_MOS ("
-            "OPTIMIZED_MOS_ID, GRORDER_MOS_ID, GOODSID, QTY, LONGPROF, CUTWIDTH, BORDER, MINREST, MINTRASH, MAP, ISFORPAIR, OSTAT, SUMPROF, RESTPERCENT, TRASHPERCENT, BEGININDENT, ENDINDENT, SUMTRASH, ISBAR, WAREHOUSEREMAINDERSID"
-            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            "OPTIMIZED_MOS_ID, GRORDER_MOS_ID, GOODSID, QTY, LONGPROF, CUTWIDTH, BORDER, MINREST, MINTRASH, MAP, ISFORPAIR, OSTAT, SUMPROF, RESTPERCENT, TRASHPERCENT, BEGININDENT, ENDINDENT, SUMTRASH, ISBAR"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         )
 
         cur.execute(
@@ -922,7 +875,6 @@ def insert_optimized_mos(
                 endindent,
                 sumtrash,
                 isbar,
-                warehouseremaindersid,
             ),
         )
 
@@ -948,7 +900,7 @@ def insert_optimized_mos(
             beginindent=beginindent,
             endindent=endindent,
             sumtrash=sumtrash,
-            warehouseremaindersid=warehouseremaindersid,
+            warehouseremaindersid=None,  # Это поле не существует в таблице
         )
     except Exception as e:
         try:
@@ -1156,6 +1108,19 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
     
     try:
         print(f"🔧 DB: Начало корректировки материалов для москитных сеток grorders_mos_id={grorders_mos_id}")
+        print(f"🔧 DB: Получены параметры:")
+        print(f"   used_materials: {len(used_materials) if used_materials else 0} записей")
+        print(f"   business_remainders: {len(business_remainders) if business_remainders else 0} записей")
+        
+        if used_materials:
+            print(f"🔧 DB: Детализация used_materials:")
+            for i, material in enumerate(used_materials):
+                print(f"   [{i}] goodsid={material.get('goodsid')}, length={material.get('length')}, quantity={material.get('quantity')}, is_remainder={material.get('is_remainder')}")
+        
+        if business_remainders:
+            print(f"🔧 DB: Детализация business_remainders:")
+            for i, remainder in enumerate(business_remainders):
+                print(f"   [{i}] goodsid={remainder.get('goodsid')}, length={remainder.get('length')}, quantity={remainder.get('quantity')}")
         
         con = get_db_connection()
         cur = con.cursor()
@@ -1365,6 +1330,8 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
                 if is_remainder:
                     # Это деловой остаток - добавляем в OUTLAYREMAINDER
                     # Для деловых остатков количество остается в штуках
+                    print(f"🔧 DB: Обрабатываем деловой остаток: goodsid={goodsid}, length={length}, quantity={quantity}, is_remainder={is_remainder}")
+                    
                     insert_outlay_remainder_sql = """
                     INSERT INTO OUTLAYREMAINDER (
                         OUTLAYREMAINDERID, OUTLAYID, GOODSID, ISAPPROVED, 
@@ -1374,8 +1341,9 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
                         ?, 0, 0, ?, 0, 1
                     )
                     """
+                    print(f"🔧 DB: Выполняем SQL: INSERT INTO OUTLAYREMAINDER с параметрами: outlay_id={outlay_id}, goodsid={goodsid}, length={int(length)}, quantity={quantity}")
                     cur.execute(insert_outlay_remainder_sql, (outlay_id, goodsid, int(length), quantity))
-                    print(f"🔧 DB: Добавлен использованный деловой остаток в OUTLAYREMAINDER goodsid={goodsid}, длина={length}, количество={quantity}шт")
+                    print(f"🔧 DB: ✅ Добавлен использованный деловой остаток в OUTLAYREMAINDER goodsid={goodsid}, длина={length}, количество={quantity}шт")
                 else:
                     # Это основной материал - добавляем в OUTLAYDETAIL
                     # Получаем measureid для товара

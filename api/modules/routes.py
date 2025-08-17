@@ -260,6 +260,8 @@ async def create_optimized_mos(request: OptimizedMosCreate):
     Создать запись в таблице OPTIMIZED_MOS
     """
     try:
+        print(f"🔧 API: Создание записи в OPTIMIZED_MOS: grorder_mos_id={request.grorder_mos_id}, goodsid={request.goodsid}")
+        
         created = insert_optimized_mos(
             grorder_mos_id=request.grorder_mos_id,
             goodsid=request.goodsid,
@@ -278,10 +280,13 @@ async def create_optimized_mos(request: OptimizedMosCreate):
             beginindent=request.beginindent,
             endindent=request.endindent,
             sumtrash=request.sumtrash,
-            warehouseremaindersid=request.warehouseremaindersid,
         )
+        
+        print(f"✅ API: Запись в OPTIMIZED_MOS создана успешно: id={created.id}")
         return created
+        
     except Exception as e:
+        print(f"❌ API: Ошибка создания записи в OPTIMIZED_MOS: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -291,6 +296,8 @@ async def create_optdetail_mos(request: OptDetailMosCreate):
     Создать запись в таблице OPTDETAIL_MOS
     """
     try:
+        print(f"🔧 API: Создание записи в OPTDETAIL_MOS: optimized_mos_id={request.optimized_mos_id}, orderid={request.orderid}")
+        
         # Обогащаем поля перед вставкой, чтобы в insert_optdetail_mos попадали корректные значения
         enriched = enrich_optdetail_mos_fields(
             optimized_mos_id=request.optimized_mos_id,
@@ -336,8 +343,12 @@ async def create_optdetail_mos(request: OptDetailMosCreate):
             handleposfalts=enriched.get("handleposfalts"),
             flugelopentag=enriched.get("flugelopentag"),
         )
+        
+        print(f"✅ API: Запись в OPTDETAIL_MOS создана успешно: id={created.id}")
         return created
+        
     except Exception as e:
+        print(f"❌ API: Ошибка создания записи в OPTDETAIL_MOS: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -364,6 +375,8 @@ async def adjust_materials_altawin(request: dict):
     try:
         from utils.db_functions import adjust_materials_for_moskitka_optimization
         
+        print(f"🔧 API: adjust_materials_altawin вызван с request: {request}")
+        
         grorders_mos_id = request.get('grorders_mos_id')
         if not grorders_mos_id:
             raise HTTPException(status_code=400, detail="grorders_mos_id обязателен")
@@ -371,6 +384,21 @@ async def adjust_materials_altawin(request: dict):
         # Получаем данные об использованных материалах и деловых остатках
         used_materials = request.get('used_materials', [])  # Список использованных материалов
         business_remainders = request.get('business_remainders', [])  # Список деловых остатков
+        
+        print(f"🔧 API: Получены данные:")
+        print(f"   grorders_mos_id: {grorders_mos_id}")
+        print(f"   used_materials: {len(used_materials)} записей")
+        print(f"   business_remainders: {len(business_remainders)} записей")
+        
+        if used_materials:
+            print(f"🔧 API: Детализация used_materials:")
+            for i, material in enumerate(used_materials):
+                print(f"   [{i}] goodsid={material.get('goodsid')}, length={material.get('length')}, quantity={material.get('quantity')}, is_remainder={material.get('is_remainder')}")
+        
+        if business_remainders:
+            print(f"🔧 API: Детализация business_remainders:")
+            for i, remainder in enumerate(business_remainders):
+                print(f"   [{i}] goodsid={remainder.get('goodsid')}, length={remainder.get('length')}, quantity={remainder.get('quantity')}")
         
         result = adjust_materials_for_moskitka_optimization(
             grorders_mos_id, 
