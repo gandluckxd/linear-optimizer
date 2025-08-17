@@ -1364,6 +1364,7 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
                 
                 if is_remainder:
                     # Это деловой остаток - добавляем в OUTLAYREMAINDER
+                    # Для деловых остатков количество остается в штуках
                     insert_outlay_remainder_sql = """
                     INSERT INTO OUTLAYREMAINDER (
                         OUTLAYREMAINDERID, OUTLAYID, GOODSID, ISAPPROVED, 
@@ -1388,6 +1389,19 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
                     measure_result = cur.fetchone()
                     measureid = measure_result[0] if measure_result else 1  # По умолчанию 1
                     
+                    # Получаем thick из groupgoods для правильного расчета количества
+                    thick_sql = """
+                    SELECT gg.thick FROM goods g
+                    JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid
+                    WHERE g.goodsid = ?
+                    """
+                    cur.execute(thick_sql, (goodsid,))
+                    thick_result = cur.fetchone()
+                    thick = thick_result[0] if thick_result else 6000  # По умолчанию 6000 мм
+                    
+                    # Рассчитываем правильное количество: количество хлыстов * thick
+                    correct_quantity = quantity * thick
+                    
                     insert_outlay_detail_sql = """
                     INSERT INTO OUTLAYDETAIL (
                         OUTLAYDETAILID, OUTLAYID, GOODSID, QTY, MEASUREID, 
@@ -1397,8 +1411,8 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
                         0, 0, 1
                     )
                     """
-                    cur.execute(insert_outlay_detail_sql, (outlay_id, goodsid, quantity, measureid))
-                    print(f"🔧 DB: Добавлен использованный материал goodsid={goodsid}, количество={quantity}шт (в штуках для outlaydetail)")
+                    cur.execute(insert_outlay_detail_sql, (outlay_id, goodsid, correct_quantity, measureid))
+                    print(f"🔧 DB: Добавлен использованный материал goodsid={goodsid}, количество={quantity}шт * {thick}мм = {correct_quantity}мм в outlaydetail")
         
         # Заполняем приход деловыми остатками
         if business_remainders:
@@ -1422,7 +1436,20 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
                 price_result = cur.fetchone()
                 price = price_result[0] if price_result else 0
                 
-                # Добавляем деловой остаток в приход
+                # Получаем thick из groupgoods для правильного расчета количества
+                thick_sql = """
+                SELECT gg.thick FROM goods g
+                JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid
+                WHERE g.goodsid = ?
+                """
+                cur.execute(thick_sql, (goodsid,))
+                thick_result = cur.fetchone()
+                thick = thick_result[0] if thick_result else 6000  # По умолчанию 6000 мм
+                
+                # Рассчитываем правильное количество: количество хлыстов * thick
+                correct_quantity = quantity * thick
+                
+                # Добавляем деловой остаток в приход (SUPPLYREMAINDER)
                 insert_supply_remainder_sql = """
                 INSERT INTO SUPPLYREMAINDER (
                     SUPPLYREMAINDERID, SUPPLYID, GOODSID, ISAPPROVED, 
@@ -1432,8 +1459,10 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
                     ?, 0, 0, ?, ?, 1
                 )
                 """
-                cur.execute(insert_supply_remainder_sql, (supply_id, goodsid, int(length), quantity, price))
-                print(f"🔧 DB: Добавлен деловой остаток в приход goodsid={goodsid}, длина={length}, количество={quantity}")
+                cur.execute(insert_supply_remainder_sql, (supply_id, goodsid, int(length), correct_quantity, price))
+                print(f"🔧 DB: Добавлен деловой остаток в SUPPLYREMAINDER goodsid={goodsid}, длина={length}, количество={quantity}шт * {thick}мм = {correct_quantity}мм")
+                
+
         
         # Фиксируем изменения
         con.commit()
