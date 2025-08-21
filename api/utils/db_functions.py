@@ -275,7 +275,12 @@ def get_stock_materials(profile_codes: List[str]) -> List[StockMaterial]:
     stock_materials = []
     
     if not profile_codes:
+        if ENABLE_LOGGING:
+            print("⚠️ get_stock_materials: Пустой список артикулов profile_codes")
         return stock_materials
+    
+    if ENABLE_LOGGING:
+        print(f"🔧 get_stock_materials: Загрузка материалов для {len(profile_codes)} артикулов: {profile_codes}")
     
     try:
         con = get_db_connection()
@@ -307,21 +312,42 @@ def get_stock_materials(profile_codes: List[str]) -> List[StockMaterial]:
         ORDER BY g.MARKING
         """
         
+        if ENABLE_LOGGING:
+            print(f"🔧 get_stock_materials: Выполняю SQL-запрос:")
+            print(f"   SQL: {sql}")
+            print(f"   Параметры: {profile_codes}")
+        
         cur.execute(sql, profile_codes)
         rows = cur.fetchall()
+        
+        if ENABLE_LOGGING:
+            print(f"🔧 get_stock_materials: Получено {len(rows)} строк из БД")
+            for i, row in enumerate(rows):
+                print(f"   Строка {i+1}: {row}")
         
         for row in rows:
             material = StockMaterial(
                 profile_code=row[0],  # profile_code
-                length=float(row[1]) if row[1] else 6000.0,  # length (типовой размер из gg.LENGTH)
+                length=float(row[1]) if row[1] else 6000.0,  # length (типовой размер из gg.THICK)
                 quantity_pieces=int(row[4]) if row[4] else 0  # quantity_pieces - складское количество / типовой размер
             )
             stock_materials.append(material)
+            
+            if ENABLE_LOGGING:
+                print(f"   ✅ Создан материал: {material.profile_code}, длина={material.length}мм, количество={material.quantity_pieces}шт")
         
         con.close()
         
         if ENABLE_LOGGING:
-            print(f"✅ Получено {len(stock_materials)} материалов со склада")
+            print(f"✅ get_stock_materials: Итого получено {len(stock_materials)} материалов со склада")
+            if stock_materials:
+                print(f"   Распределение по артикулам:")
+                for material in stock_materials:
+                    print(f"   - {material.profile_code}: {material.quantity_pieces} хлыстов по {material.length}мм")
+            else:
+                print("⚠️ МАТЕРИАЛЫ НЕ ЗАГРУЖЕНЫ! Запускаю диагностику...")
+                diagnosis = diagnose_stock_materials_issue(profile_codes)
+                print(f"📋 Результат диагностики: {diagnosis}")
             
     except Exception as e:
         if ENABLE_LOGGING:
@@ -329,6 +355,146 @@ def get_stock_materials(profile_codes: List[str]) -> List[StockMaterial]:
         raise
     
     return stock_materials
+
+def diagnose_stock_materials_issue(profile_codes: List[str]) -> Dict[str, Any]:
+    """
+    Диагностика проблем с загрузкой материалов со склада
+    """
+    diagnosis = {
+        "profile_codes": profile_codes,
+        "goods_found": [],
+        "warehouse_data": [],
+        "groupgoods_data": [],
+        "thick_values": [],
+        "total_warehouse_records": 0,
+        "issues": []
+    }
+    
+    if not profile_codes:
+        diagnosis["issues"].append("Пустой список артикулов profile_codes")
+        return diagnosis
+    
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+        
+        # Создаем строку для IN условия
+        placeholders = ','.join(['?'] * len(profile_codes))
+        
+        # 1. Проверяем, есть ли товары с такими артикулами
+        goods_sql = f"""
+        SELECT g.GOODSID, g.MARKING, g.DELETED, gg.GRGOODSID, gg.THICK, gg.DELETED as GG_DELETED
+        FROM GOODS g 
+        JOIN GROUPGOODS gg ON gg.GRGOODSID = g.GRGOODSID
+        WHERE g.MARKING IN ({placeholders})
+        ORDER BY g.MARKING
+        """
+        
+        cur.execute(goods_sql, profile_codes)
+        goods_rows = cur.fetchall()
+        
+        for row in goods_rows:
+            diagnosis["goods_found"].append({
+                "goodsid": row[0],
+                "marking": row[1], 
+                "deleted": row[2],
+                "grgoodsid": row[3],
+                "thick": row[4],
+                "gg_deleted": row[5]
+            })
+            diagnosis["thick_values"].append(row[4])
+        
+        if not goods_rows:
+            diagnosis["issues"].append(f"Не найдено товаров с артикулами: {profile_codes}")
+            return diagnosis
+        
+        # 2. Проверяем склад для найденных товаров
+        goodsids = [str(row[0]) for row in goods_rows]
+        warehouse_sql = f"""
+        SELECT wh.GOODSID, wh.QTY, wh.RESERVEQTY, (wh.QTY - wh.RESERVEQTY) as available_qty,
+               whl.DELETED as WHL_DELETED, g.MARKING
+        FROM WAREHOUSE wh
+        JOIN WH_LIST whl ON whl.WHLISTID = wh.WHLISTID  
+        JOIN GOODS g ON g.GOODSID = wh.GOODSID
+        WHERE wh.GOODSID IN ({','.join(['?'] * len(goodsids))})
+        ORDER BY g.MARKING
+        """
+        
+        cur.execute(warehouse_sql, goodsids)
+        warehouse_rows = cur.fetchall()
+        
+        diagnosis["total_warehouse_records"] = len(warehouse_rows)
+        
+        for row in warehouse_rows:
+            diagnosis["warehouse_data"].append({
+                "goodsid": row[0],
+                "qty": row[1],
+                "reserve_qty": row[2], 
+                "available_qty": row[3],
+                "whl_deleted": row[4],
+                "marking": row[5]
+            })
+        
+        # 3. Анализ условий фильтрации
+        filtered_count = 0
+        available_count = 0
+        thick_filtered_count = 0
+        
+        for wh_row in warehouse_rows:
+            available_qty = wh_row[3]
+            whl_deleted = wh_row[4]
+            goodsid = wh_row[0]
+            
+            # Находим thick для этого товара
+            thick = None
+            for goods_row in goods_rows:
+                if goods_row[0] == goodsid:
+                    thick = goods_row[4]
+                    break
+            
+            if available_qty > 0:
+                available_count += 1
+                
+            if whl_deleted == 0 and available_qty > 0:
+                filtered_count += 1
+                
+            if thick is not None and thick > 1:
+                thick_filtered_count += 1
+        
+        diagnosis["available_count"] = available_count
+        diagnosis["filtered_count"] = filtered_count  
+        diagnosis["thick_filtered_count"] = thick_filtered_count
+        
+        # 4. Выявляем проблемы
+        if not warehouse_rows:
+            diagnosis["issues"].append("Товары не найдены на складе")
+        elif available_count == 0:
+            diagnosis["issues"].append("Все товары имеют нулевые остатки")
+        elif filtered_count == 0:
+            diagnosis["issues"].append("Все записи отфильтрованы условиями (whl.DELETED=0 или qty<=0)")
+        elif thick_filtered_count == 0:
+            diagnosis["issues"].append("Все товары отфильтрованы условием gg.THICK > 1")
+            
+        con.close()
+        
+        if ENABLE_LOGGING:
+            print(f"🔧 Диагностика материалов:")
+            print(f"   Артикулы: {profile_codes}")
+            print(f"   Найдено товаров: {len(goods_rows)}")
+            print(f"   Записей на складе: {len(warehouse_rows)}")
+            print(f"   С доступными остатками: {available_count}")
+            print(f"   Прошли фильтрацию: {filtered_count}")
+            print(f"   С thick > 1: {thick_filtered_count}")
+            print(f"   Значения thick: {diagnosis['thick_values']}")
+            if diagnosis["issues"]:
+                print(f"   Проблемы: {diagnosis['issues']}")
+                
+    except Exception as e:
+        diagnosis["issues"].append(f"Ошибка диагностики: {e}")
+        if ENABLE_LOGGING:
+            print(f"❌ Ошибка диагностики: {e}")
+    
+    return diagnosis
 
 
 def save_optimization_result(optimization_result, save_to_order: bool, create_cutting_list: bool):

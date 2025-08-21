@@ -73,6 +73,7 @@ class DataLoadThread(QThread):
             
             # Получаем уникальные артикулы профилей
             profile_codes = list(set(profile.profile_code for profile in all_profiles))
+            self.debug_step.emit(f"🔧 Найдено {len(profile_codes)} уникальных артикулов: {profile_codes}")
             
             # Загружаем остатки со склада
             self.debug_step.emit("📦 Загрузка остатков со склада...")
@@ -83,6 +84,14 @@ class DataLoadThread(QThread):
             self.debug_step.emit("📦 Загрузка материалов со склада...")
             stock_materials = self.api_client.get_stock_materials(profile_codes)
             self.debug_step.emit(f"✅ Загружено {len(stock_materials)} материалов")
+            
+            # Детальная информация о загруженных материалах
+            if stock_materials:
+                self.debug_step.emit("📋 Детали загруженных материалов:")
+                for material in stock_materials:
+                    self.debug_step.emit(f"  - {material.profile_code}: {material.quantity_pieces} хлыстов по {material.length}мм")
+            else:
+                self.debug_step.emit("⚠️ ВНИМАНИЕ: Не загружен ни один материал!")
             
             # Отправляем данные в главный поток
             self.data_loaded.emit(all_profiles, {'remainders': stock_remainders, 'materials': stock_materials})
@@ -955,6 +964,25 @@ class LinearOptimizerWindow(QMainWindow):
             
             cut_plans_count = len(result.cut_plans) if result.cut_plans else 0
             print(f"✅ Оптимизация завершена! Использовано хлыстов: {cut_plans_count}")
+            
+            # НОВОЕ: Проверяем предупреждения о нехватке материалов или повторном использовании остатков
+            if result.message:
+                if "НЕХВАТКА МАТЕРИАЛОВ" in result.message:
+                    QMessageBox.warning(
+                        self,
+                        "Нехватка материалов на складе",
+                        result.message
+                    )
+                elif "дублирующиеся деловые остатки" in result.message:
+                    QMessageBox.critical(
+                        self,
+                        "Ошибка данных склада",
+                        f"Обнаружены проблемы с деловыми остатками:\n\n{result.message}\n\n"
+                        f"Рекомендации:\n"
+                        f"• Проверьте данные склада на дублирование остатков\n"
+                        f"• Убедитесь, что каждый деловой остаток имеет уникальный warehouseremaindersid\n"
+                        f"• Обратитесь к администратору системы"
+                    )
             
         except Exception as e:
             print(f"⚠️ Ошибка при обработке результата оптимизации: {e}")

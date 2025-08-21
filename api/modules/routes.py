@@ -106,6 +106,18 @@ async def get_stock_materials_endpoint(request: StockMaterialRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/diagnose-stock-materials")
+async def diagnose_stock_materials_endpoint(request: StockMaterialRequest):
+    """
+    Диагностика проблем с загрузкой материалов со склада
+    """
+    try:
+        from utils.db_functions import diagnose_stock_materials_issue
+        diagnosis = diagnose_stock_materials_issue(request.profile_codes)
+        return diagnosis
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/moskitka-profiles", response_model=List[MoskitkaProfile])
 async def get_moskitka_profiles_endpoint(request: MoskitkaRequest):
     """

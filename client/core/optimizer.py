@@ -67,6 +67,36 @@ class SimpleOptimizer:
             if not stocks:
                 return self._create_error_result("Нет доступных хлыстов")
             
+            # КРИТИЧЕСКИ ВАЖНО: Проверяем уникальность деловых остатков
+            remainder_validation = self._validate_input_remainders(stocks)
+            if remainder_validation["has_duplicates"]:
+                error_msg = "Обнаружены дублирующиеся деловые остатки:\n"
+                for duplicate in remainder_validation["duplicates"]:
+                    error_msg += f"- warehouseremaindersid {duplicate['warehouseremaindersid']}: {duplicate['count']} раз\n"
+                return self._create_error_result(error_msg)
+            
+            # Проверяем достаточность материалов
+            if progress_fn:
+                progress_fn(15)
+            material_check = self._check_material_availability(profiles, stocks)
+            if not material_check["sufficient"]:
+                # Возвращаем результат с предупреждением о нехватке материалов
+                warning_msg = "⚠️ НЕХВАТКА МАТЕРИАЛОВ НА СКЛАДЕ:\n\n"
+                for shortage in material_check["shortages"]:
+                    warning_msg += f"📋 Артикул: {shortage['profile_code']}\n"
+                    warning_msg += f"   Требуется: {shortage['needed']} деталей общей длиной {shortage['total_length']:.0f}мм\n"
+                    warning_msg += f"   Доступно: {shortage['available']} хлыстов общей длиной {shortage['available_length']:.0f}мм\n"
+                    warning_msg += f"   Нехватка: {shortage['shortage']} деталей на {shortage['shortage_length']:.0f}мм\n\n"
+                    
+                warning_msg += "🔧 Рекомендации:\n"
+                warning_msg += "- Докупите недостающие материалы\n"
+                warning_msg += "- Измените конструкцию для использования доступных материалов\n"
+                warning_msg += "- Проверьте остатки на складе\n\n"
+                warning_msg += "Оптимизация будет выполнена с имеющимися материалами."
+                
+                print(f"⚠️ {warning_msg}")
+                # Продолжаем оптимизацию, но с предупреждением
+            
             # Фильтруем данные
             valid_profiles = [p for p in profiles if p.quantity > 0 and p.length > 0]
             valid_stocks = [s for s in stocks if s.quantity > 0 and s.length > 0]
@@ -226,28 +256,31 @@ class SimpleOptimizer:
         available_stocks = []
         for stock in stocks:
             if stock.is_remainder:
-                # КРИТИЧЕСКИ ВАЖНО: для деловых остатков создаем ровно столько объектов, сколько указано в quantity
-                # Каждый деловой остаток может использоваться только один раз!
-                for i in range(stock.quantity):
-                    available_stocks.append({
-                        'id': f"{stock.id}_remainder_{i+1}",  # Уникальный ID для каждого делового остатка
-                        'original_id': stock.id,
-                        'length': stock.length,
-                        'profile_code': getattr(stock, 'profile_code', None),
-                        'warehouseremaindersid': getattr(stock, 'warehouseremaindersid', None),
-                        'groupgoods_thick': getattr(stock, 'groupgoods_thick', 6000),
-                        'is_remainder': True,
-                        'used_length': 0,
-                        'cuts': [],
-                        'cuts_count': 0,
-                        'quantity': 1,  # Каждый деловой остаток используется только 1 раз
-                        'used_quantity': 0,
-                        'max_usage': 1,  # Максимальное количество использований = 1
-                        'original_stock': stock,
-                        'instance_id': i + 1,
-                        'is_used': False  # Флаг использования
-                    })
-                print(f"🔧 Создано {stock.quantity} экземпляров делового остатка {stock.id} длиной {stock.length}мм")
+                # КРИТИЧЕСКИ ВАЖНО: для деловых остатков quantity должно быть ВСЕГДА 1!
+                # Если quantity > 1, это ошибка в данных - каждый деловой остаток уникален
+                if stock.quantity != 1:
+                    print(f"⚠️ ВНИМАНИЕ: Деловой остаток {stock.id} имеет quantity={stock.quantity}, принудительно устанавливаю в 1")
+                
+                # Создаем ОДИН объект для каждого делового остатка
+                available_stocks.append({
+                    'id': f"{stock.id}_remainder_unique",  # Уникальный ID для делового остатка
+                    'original_id': stock.id,
+                    'length': stock.length,
+                    'profile_code': getattr(stock, 'profile_code', None),
+                    'warehouseremaindersid': getattr(stock, 'warehouseremaindersid', None),
+                    'groupgoods_thick': getattr(stock, 'groupgoods_thick', 6000),
+                    'is_remainder': True,
+                    'used_length': 0,
+                    'cuts': [],
+                    'cuts_count': 0,
+                    'quantity': 1,  # ВСЕГДА 1 для деловых остатков
+                    'used_quantity': 0,
+                    'max_usage': 1,  # Максимальное количество использований = 1
+                    'original_stock': stock,
+                    'instance_id': 1,  # Всегда 1, так как остаток уникален
+                    'is_used': False  # Флаг использования
+                })
+                print(f"🔧 Создан уникальный деловой остаток {stock.id} (warehouseremaindersid: {getattr(stock, 'warehouseremaindersid', 'N/A')}) длиной {stock.length}мм")
             else:
                 # Для цельных материалов создаем объекты для каждого экземпляра
                 for i in range(stock.quantity):
@@ -288,8 +321,21 @@ class SimpleOptimizer:
             available_stocks = [s for s in available_stocks if not bool(s.get('is_remainder'))]
             available_stocks.sort(key=lambda x: x['length'])
         else:
-            # Используем и остатки, и материалы — остатки приоритетнее
-            available_stocks.sort(key=lambda x: (0 if x.get('is_remainder') else 1, x['length']))
+            # КРИТИЧЕСКИ ВАЖНО: деловые остатки имеют АБСОЛЮТНЫЙ приоритет!
+            # Сортируем так, чтобы деловые остатки были в самом начале
+            remainders = [s for s in available_stocks if s.get('is_remainder')]
+            materials = [s for s in available_stocks if not s.get('is_remainder')]
+            
+            # Сортируем деловые остатки по убыванию длины (сначала длинные)
+            remainders.sort(key=lambda x: -x['length'])
+            
+            # Сортируем цельные материалы по возрастанию длины 
+            materials.sort(key=lambda x: x['length'])
+            
+            # Объединяем: СНАЧАЛА ВСЕ остатки, потом материалы
+            available_stocks = remainders + materials
+            
+            print(f"🔧 Приоритизация: {len(remainders)} деловых остатков в начале, {len(materials)} цельных материалов после")
         
         # РАЗМЕЩАЕМ ДЕТАЛИ ОДИН РАЗ - убираем множественные проходы!
         print("🚀 ЗАПУСКАЮ ОДИН ПРОХОД ОПТИМИЗАЦИИ!")
@@ -518,18 +564,30 @@ class SimpleOptimizer:
             effective_length = max(0, stock['length'] - (self.settings.begin_indent + self.settings.end_indent))
             usage_percent = (stock['used_length'] / effective_length) * 100 if effective_length > 0 else 100
             
-            # Для деловых остатков: помечаем как использованный сразу после первого размещения
+            # Для деловых остатков: оптимизируем как обычные хлысты!
             if stock['is_remainder']:
-                stock['is_used'] = True
-                stock['used_quantity'] = 1
-                print(f"🔧 Деловой остаток {stock['id']} помечен как использованный")
+                remaining_length = effective_length - stock['used_length']
+                # Помечаем как использованный только если места недостаточно для новых деталей
+                if remaining_length < self.settings.min_remainder_length:
+                    stock['is_used'] = True
+                    stock['used_quantity'] = 1
+                    print(f"🔧 Деловой остаток {stock['id']} заполнен полностью (остаток {remaining_length:.0f}мм)")
+                else:
+                    print(f"🔧 Деловой остаток {stock['id']} частично заполнен (остаток {remaining_length:.0f}мм) - можно добавить еще детали")
             else:
-                # Для цельных материалов: увеличиваем счетчик если хлыст заполнен достаточно
-                if usage_percent > 70:  # Пониженный порог для более эффективного использования
-                    stock['used_quantity'] += 1
-                    if usage_percent > 90:
-                        stock['is_used'] = True  # Полностью заполненный хлыст
-                        print(f"🔧 Цельный материал {stock['id']} заполнен на {usage_percent:.1f}% и помечен как использованный")
+                # Для цельных материалов: помечаем как использованный только при очень высоком заполнении
+                # ИЛИ если остается слишком мало места для новых деталей
+                remaining_length = effective_length - stock['used_length']
+                
+                # Помечаем как использованный только если:
+                # 1. Заполнено более 95% ИЛИ
+                # 2. Остается меньше минимальной длины детали (например, 300мм)
+                if usage_percent > 95 or remaining_length < self.settings.min_remainder_length:
+                    stock['is_used'] = True
+                    stock['used_quantity'] = stock.get('max_usage', 1)  # Помечаем как полностью использованный
+                    print(f"🔧 Цельный материал {stock['id']} заполнен на {usage_percent:.1f}% (остаток {remaining_length:.0f}мм) и помечен как использованный")
+                else:
+                    print(f"🔧 Цельный материал {stock['id']} заполнен на {usage_percent:.1f}% (остаток {remaining_length:.0f}мм) - продолжаем использовать")
             
             # Отладочная информация
             if force_placement:
@@ -570,13 +628,30 @@ class SimpleOptimizer:
         waste = waste_or_remainder
         remainder = None
         
-        # Проверяем остаток
-        if waste_or_remainder >= self.settings.min_remainder_length:
-            remainder = waste_or_remainder
-            waste = 0
+        # СПЕЦИАЛЬНАЯ ЛОГИКА для деловых остатков:
+        # Если кроим деловой остаток, то обрезок ВСЕГДА проверяем по min_remainder_length
+        if stock.get('is_remainder', False):
+            # Для деловых остатков: проверяем обрезок по пользовательскому параметру
+            if waste_or_remainder >= self.settings.min_remainder_length:
+                remainder = waste_or_remainder
+                waste = 0
+                print(f"🔧 Деловой остаток: обрезок {waste_or_remainder:.0f}мм >= {self.settings.min_remainder_length}мм - становится новым деловым остатком")
+            else:
+                # Обрезок меньше минимальной длины - в отходы
+                waste = waste_or_remainder
+                remainder = None
+                print(f"🔧 Деловой остаток: обрезок {waste_or_remainder:.0f}мм < {self.settings.min_remainder_length}мм - в отходы")
         else:
-            # Минимальный отход: допускаем, но стараемся избегать в выборе
-            pass
+            # Для цельных материалов: стандартная логика
+            if waste_or_remainder >= self.settings.min_remainder_length:
+                remainder = waste_or_remainder
+                waste = 0
+                print(f"🔧 Цельный материал: остаток {waste_or_remainder:.0f}мм >= {self.settings.min_remainder_length}мм - становится деловым остатком")
+            else:
+                # Минимальный отход: допускаем, но стараемся избегать в выборе
+                waste = waste_or_remainder
+                remainder = None
+                print(f"🔧 Цельный материал: отход {waste_or_remainder:.0f}мм < {self.settings.min_remainder_length}мм")
         
         waste_percent = (waste / stock['length'] * 100) if stock['length'] > 0 else 0
         
@@ -674,6 +749,168 @@ class SimpleOptimizer:
             success=False,
             message=message
         )
+    
+    def _validate_input_remainders(self, stocks: List[Stock]) -> Dict[str, Any]:
+        """
+        Валидирует уникальность деловых остатков во входных данных
+        
+        Returns:
+            Dict с результатами валидации
+        """
+        validation_result = {
+            "has_duplicates": False,
+            "duplicates": [],
+            "total_remainders": 0,
+            "unique_remainders": 0
+        }
+        
+        # Отслеживаем warehouseremaindersid
+        remainder_counts = {}
+        
+        for stock in stocks:
+            if stock.is_remainder and hasattr(stock, 'warehouseremaindersid') and stock.warehouseremaindersid:
+                validation_result["total_remainders"] += stock.quantity
+                
+                whrid = stock.warehouseremaindersid
+                if whrid not in remainder_counts:
+                    remainder_counts[whrid] = {
+                        "count": 0,
+                        "stock_ids": [],
+                        "total_quantity": 0
+                    }
+                
+                remainder_counts[whrid]["count"] += 1
+                remainder_counts[whrid]["stock_ids"].append(stock.id)
+                remainder_counts[whrid]["total_quantity"] += stock.quantity
+        
+        validation_result["unique_remainders"] = len(remainder_counts)
+        
+        # Ищем дубли - каждый warehouseremaindersid должен встречаться СТРОГО один раз с quantity=1
+        for whrid, info in remainder_counts.items():
+            if info["count"] > 1:
+                validation_result["has_duplicates"] = True
+                validation_result["duplicates"].append({
+                    "warehouseremaindersid": whrid,
+                    "count": info["count"],
+                    "total_quantity": info["total_quantity"],
+                    "stock_ids": info["stock_ids"],
+                    "issue": f"warehouseremaindersid {whrid} встречается {info['count']} раз (должен быть 1)"
+                })
+            elif info["total_quantity"] > 1:
+                validation_result["has_duplicates"] = True
+                validation_result["duplicates"].append({
+                    "warehouseremaindersid": whrid,
+                    "count": info["count"],
+                    "total_quantity": info["total_quantity"],
+                    "stock_ids": info["stock_ids"],
+                    "issue": f"warehouseremaindersid {whrid} имеет quantity={info['total_quantity']} (должно быть 1)"
+                })
+        
+        if validation_result["has_duplicates"]:
+            print(f"❌ Обнаружены дублирующиеся деловые остатки:")
+            for duplicate in validation_result["duplicates"]:
+                print(f"   {duplicate['issue']}")
+                print(f"   Stock IDs: {duplicate['stock_ids']}")
+        else:
+            print(f"✅ Валидация деловых остатков пройдена: {validation_result['total_remainders']} остатков, {validation_result['unique_remainders']} уникальных")
+        
+        return validation_result
+    
+    def _check_material_availability(self, profiles: List[Profile], stocks: List[Stock]) -> Dict[str, Any]:
+        """
+        Проверяет достаточность материалов для выполнения заказа
+        
+        Returns:
+            Dict с результатами проверки
+        """
+        check_result = {
+            "sufficient": True,
+            "shortages": [],
+            "by_profile": {}
+        }
+        
+        # Группируем потребности по артикулам
+        needs_by_profile = {}
+        for profile in profiles:
+            code = profile.profile_code
+            if code not in needs_by_profile:
+                needs_by_profile[code] = {
+                    "pieces": 0,
+                    "total_length": 0,
+                    "max_length": 0
+                }
+            
+            needs_by_profile[code]["pieces"] += profile.quantity
+            needs_by_profile[code]["total_length"] += profile.length * profile.quantity
+            needs_by_profile[code]["max_length"] = max(needs_by_profile[code]["max_length"], profile.length)
+        
+        # Группируем доступные материалы по артикулам
+        available_by_profile = {}
+        for stock in stocks:
+            code = getattr(stock, 'profile_code', '') or ''
+            if not code:
+                continue
+                
+            if code not in available_by_profile:
+                available_by_profile[code] = {
+                    "total_length": 0,
+                    "pieces": 0,
+                    "stocks": []
+                }
+            
+            # Для деловых остатков каждый остаток считается отдельно
+            if stock.is_remainder:
+                available_by_profile[code]["total_length"] += stock.length * stock.quantity
+                available_by_profile[code]["pieces"] += stock.quantity
+            else:
+                # Для цельных материалов учитываем типовую длину
+                typical_length = getattr(stock, 'groupgoods_thick', 6000) or 6000
+                available_by_profile[code]["total_length"] += typical_length * stock.quantity
+                available_by_profile[code]["pieces"] += stock.quantity
+            
+            available_by_profile[code]["stocks"].append(stock)
+        
+        # Проверяем каждый артикул на достаточность
+        for profile_code, needs in needs_by_profile.items():
+            available = available_by_profile.get(profile_code, {
+                "total_length": 0,
+                "pieces": 0,
+                "stocks": []
+            })
+            
+            check_result["by_profile"][profile_code] = {
+                "needed_pieces": needs["pieces"],
+                "needed_length": needs["total_length"],
+                "available_pieces": available["pieces"],
+                "available_length": available["total_length"],
+                "sufficient": available["total_length"] >= needs["total_length"]
+            }
+            
+            # Если материала недостаточно
+            if available["total_length"] < needs["total_length"]:
+                check_result["sufficient"] = False
+                shortage = {
+                    "profile_code": profile_code,
+                    "needed": needs["pieces"],
+                    "total_length": needs["total_length"],
+                    "available": available["pieces"],
+                    "available_length": available["total_length"],
+                    "shortage": needs["pieces"] - available["pieces"],
+                    "shortage_length": needs["total_length"] - available["total_length"]
+                }
+                check_result["shortages"].append(shortage)
+        
+        print(f"🔍 Проверка материалов:")
+        print(f"   Артикулов требуется: {len(needs_by_profile)}")
+        print(f"   Артикулов доступно: {len(available_by_profile)}")
+        print(f"   Достаточно материалов: {'Да' if check_result['sufficient'] else 'Нет'}")
+        
+        if not check_result["sufficient"]:
+            print(f"   Нехватка по {len(check_result['shortages'])} артикулам:")
+            for shortage in check_result["shortages"]:
+                print(f"     {shortage['profile_code']}: нехватка {shortage['shortage_length']:.0f}мм")
+        
+        return check_result
     
     def _auto_correct_invalid_plan(self, invalid_plan: 'CutPlan', available_stocks: List[Dict], original_stocks: List['Stock']) -> List['CutPlan']:
         """
@@ -1033,8 +1270,20 @@ class SimpleOptimizer:
         # Сортируем детали по длине (от больших к меньшим) для лучшего размещения
         pieces_to_place.sort(key=lambda x: x.length, reverse=True)
         
-        # Сортируем хлысты по длине (от больших к меньшим)
-        available_stocks.sort(key=lambda x: x['length'], reverse=True)
+        # СПЕЦИАЛЬНАЯ СОРТИРОВКА: деловые остатки сначала, потом цельные материалы
+        # Деловые остатки уже должны быть в начале списка, но убеждаемся в правильном порядке
+        remainders = [s for s in available_stocks if s.get('is_remainder', False)]
+        materials = [s for s in available_stocks if not s.get('is_remainder', False)]
+        
+        # Сортируем остатки по убыванию длины
+        remainders.sort(key=lambda x: -x['length'])
+        # Сортируем цельные материалы по убыванию длины
+        materials.sort(key=lambda x: -x['length'])
+        
+        # Пересобираем список с приоритетом остатков
+        available_stocks = remainders + materials
+        
+        print(f"🔧 Порядок размещения: {len(remainders)} остатков → {len(materials)} цельных материалов")
         
         # Группируем хлысты по оригинальному ID, чтобы избежать дублирования
         stock_groups = {}
@@ -1071,10 +1320,11 @@ class SimpleOptimizer:
             if best_stock:
                 if self._add_piece_to_stock(best_stock, piece):
                     placed_count += 1
-                    print(f"🔧 Размещена деталь {piece.length}мм в хлыст {best_stock['id']} (группа {best_stock['original_id']})")
+                    stock_type = "ДЕЛОВОЙ ОСТАТОК" if best_stock.get('is_remainder', False) else "цельный хлыст"
+                    print(f"🔧 Размещена деталь {piece.length}мм в {stock_type} {best_stock['id']} (score: {best_score:.0f})")
                     
-                    # Проверяем, не заполнен ли хлыст полностью
-                    if best_stock.get('is_used', False) or best_stock['used_quantity'] >= best_stock.get('max_usage', 1):
+                    # Проверяем, не заполнен ли хлыст полностью (только если явно помечен как использованный)
+                    if best_stock.get('is_used', False):
                         # Удаляем использованный хлыст из группы
                         if best_stock in stock_groups[best_stock['original_id']]:
                             stock_groups[best_stock['original_id']].remove(best_stock)
@@ -1216,9 +1466,8 @@ class SimpleOptimizer:
         if stock.get('is_used', False):
             return False
         
-        # Проверяем максимальное количество использований
-        if stock.get('used_quantity', 0) >= stock.get('max_usage', 1):
-            return False
+        # Для цельных материалов не проверяем used_quantity - позволяем заполнять до конца
+        # Для деловых остатков это проверяется через is_used
         
         # Проверяем артикул профиля
         if stock['profile_code'] and piece.profile_code and stock['profile_code'] != piece.profile_code:
@@ -1249,30 +1498,60 @@ class SimpleOptimizer:
         """Рассчитывает "силу" размещения детали в хлыст"""
         score = 0.0
         
-        # Базовый балл за размер
+        # ОГРОМНЫЙ ПРИОРИТЕТ для деловых остатков - используем их в первую очередь!
+        if stock.get('is_remainder', False):
+            score += 10000  # МАКСИМАЛЬНЫЙ приоритет для деловых остатков
+            print(f"🔧 ДЕЛОВОЙ ОСТАТОК: {stock['id']} получает +10000 баллов")
+        
+        # Базовый балл за размер детали
         score += piece.length * 0.1
         
-        # Бонус за эффективное использование длины
         effective_length = max(0, stock['length'] - (self.settings.begin_indent + self.settings.end_indent))
-        usage_ratio = (stock['used_length'] + piece.length) / effective_length
-        if usage_ratio <= 0.8:  # Хлыст не переполнен
-            score += 100
-        elif usage_ratio <= 0.95:  # Хлыст заполнен оптимально
-            score += 200
-        else:  # Хлыст почти полный
-            score += 50
-        
-        # Бонус за минимальные отходы
+        usage_ratio = (stock['used_length'] + piece.length) / effective_length if effective_length > 0 else 1
         remaining_length = effective_length - (stock['used_length'] + piece.length)
-        if remaining_length < self.settings.min_remainder_length:
-            score += 150  # Полное использование
-        elif remaining_length >= self.settings.min_remainder_length:
-            score += 100  # Деловой остаток
         
-        # Штраф за неравномерное распределение
+        # Большой бонус за использование уже частично заполненных хлыстов
         if stock['used_length'] > 0:
-            # Предпочитаем хлысты с меньшим количеством деталей
-            score -= stock['cuts_count'] * 10
+            if stock.get('is_remainder', False):
+                score += 2000  # Дополнительный бонус для частично заполненных остатков
+            else:
+                score += 500  # Высокий приоритет для частично заполненных цельных хлыстов
+            
+            # Дополнительный бонус за максимальное заполнение
+            if usage_ratio > 0.8:
+                score += 300  # Приоритет для хорошего заполнения
+            if usage_ratio > 0.9:
+                score += 200  # Еще больший приоритет для очень хорошего заполнения
+        else:
+            # Для пустых хлыстов
+            if stock.get('is_remainder', False):
+                score += 1000  # Высокий приоритет для пустых остатков
+            else:
+                score += 50   # Низкий приоритет для пустых цельных хлыстов
+        
+        # Бонус за оптимальное использование
+        if usage_ratio <= 0.95:  # Хлыст можно заполнить
+            score += 100
+        else:  # Хлыст переполнен - снижаем приоритет
+            score -= 100
+        
+        # Бонус за полное использование или деловой остаток
+        if remaining_length < self.settings.min_remainder_length:
+            score += 200  # Полное использование - отлично
+        elif remaining_length >= self.settings.min_remainder_length and remaining_length < effective_length * 0.3:
+            score += 150  # Деловой остаток разумного размера
+        
+        # Небольшой штраф за слишком много деталей в одном хлысте (для разнообразия)
+        # НО не для деловых остатков - их нужно заполнять максимально
+        if stock['cuts_count'] > 5 and not stock.get('is_remainder', False):
+            score -= stock['cuts_count'] * 5
+        
+        # Бонус за совпадение артикулов
+        if stock.get('profile_code') == piece.profile_code:
+            if stock.get('is_remainder', False):
+                score += 200  # Большой бонус для остатков того же артикула
+            else:
+                score += 50   # Обычный бонус для цельных материалов
         
         return score
     
