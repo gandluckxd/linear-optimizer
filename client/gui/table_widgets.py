@@ -176,15 +176,34 @@ def fill_stock_table(table: QTableWidget, stocks: list):
 
 
 def fill_optimization_results_table(table: QTableWidget, cut_plans: list):
-    """Заполнение таблицы результатов оптимизации с улучшенной валидацией"""
+    """Заполнение таблицы результатов оптимизации с новой структурой столбцов"""
     table.setRowCount(0)
     
-    for plan in cut_plans:
+    for i, plan in enumerate(cut_plans):
         try:
             row = table.rowCount()
             table.insertRow(row)
             
-            # Формируем строку с распилами (безопасно)
+            # 1. Артикул (берем из первого распила)
+            profile_code = ""
+            if plan.cuts and len(plan.cuts) > 0:
+                first_cut = plan.cuts[0]
+                if isinstance(first_cut, dict) and 'profile_code' in first_cut:
+                    profile_code = first_cut['profile_code']
+            table.setItem(row, 0, _create_text_item(profile_code))
+            
+            # 2. Длина хлыста (мм)
+            table.setItem(row, 1, _create_numeric_item(plan.stock_length))
+            
+            # 3. Количество хлыстов такого распила
+            count = getattr(plan, 'count', 1)
+            table.setItem(row, 2, _create_numeric_item(count))
+            
+            # 4. Количество деталей на хлысте
+            cuts_count = plan.get_cuts_count()
+            table.setItem(row, 3, _create_numeric_item(cuts_count))
+            
+            # 5. Распил (форматируем распилы)
             cuts_parts = []
             for cut in plan.cuts:
                 if isinstance(cut, dict) and 'quantity' in cut and 'length' in cut:
@@ -193,76 +212,39 @@ def fill_optimization_results_table(table: QTableWidget, cut_plans: list):
                     cuts_parts.append("ERROR")
             cuts_text = "; ".join(cuts_parts) if cuts_parts else "Нет распилов"
             
-            # Рассчитываем правильную использованную длину
-            used_length = plan.get_used_length(5.0)  # 5мм - ширина пропила
-            total_pieces_length = plan.get_total_pieces_length()
-            cuts_count = plan.get_cuts_count()
-            saw_width_total = 5.0 * (cuts_count - 1) if cuts_count > 1 else 0
-            
-            # Проверяем корректность плана
+            # Добавляем индикатор статуса
             is_valid = plan.validate(5.0)
-            
-            # Добавляем индикатор ошибки если план некорректен
-            status_indicator = ""
             if not is_valid:
-                status_indicator = " ⚠️ ОШИБКА"
-                cuts_text += status_indicator
-            elif used_length > plan.stock_length * 0.95:  # Если использовано > 95%
-                status_indicator = " ⚡ ПЛОТНО"
+                cuts_text += " ⚠️ ОШИБКА"
+            elif plan.get_used_length(5.0) > plan.stock_length * 0.95:
+                cuts_text += " ⚡ ПЛОТНО"
             else:
-                status_indicator = " ✅ ОК"
+                cuts_text += " ✅ ОК"
             
-            # Рассчитываем реальные отходы (без учета остатков)
-            real_waste = plan.stock_length - used_length
+            table.setItem(row, 4, _create_text_item(cuts_text))
+            
+            # 6. Деловой остаток (мм)
             remainder = getattr(plan, 'remainder', None)
-            
-            # Формируем отображение отходов с учетом остатков
-            waste_display = f"{plan.waste:.0f}"
-            waste_percent_display = f"{plan.waste_percent:.1f}%"
-            
-            # Если есть остаток, добавляем индикатор
-            if remainder and remainder > 0:
-                waste_display += f" (остаток: {remainder:.0f})"
-                waste_percent_display += " 📦"  # Индикатор остатка
-            
-            # Рассчитываем данные для остатков
             remainder_length = remainder if remainder and remainder > 0 else 0
+            table.setItem(row, 5, _create_numeric_item(remainder_length))
+            
+            # 7. Деловой остаток (%)
             remainder_percent = (remainder_length / plan.stock_length * 100) if plan.stock_length > 0 and remainder_length > 0 else 0
+            table.setItem(row, 6, _create_text_item(f"{remainder_percent:.1f}%"))
             
-            # В колонке 0 теперь показываем ID и количество одинаковых хлыстов, если count>1
-            count_text = f"{getattr(plan, 'count', 1)}x" if getattr(plan, 'count', 1) > 1 else ""
+            # 8. Отход (мм)
+            waste_length = plan.stock_length - plan.get_used_length(5.0)
+            table.setItem(row, 7, _create_numeric_item(waste_length))
             
-            # Для деловых остатков показываем warehouseremaindersid, для материалов - stock_id
-            if plan.is_remainder and hasattr(plan, 'warehouseremaindersid') and plan.warehouseremaindersid:
-                stock_display_id = plan.warehouseremaindersid
-            else:
-                stock_display_id = plan.stock_id
-            
-            table.setItem(row, 0, _create_text_item(f"{count_text}{stock_display_id}"))
-            table.setItem(row, 1, _create_numeric_item(plan.stock_length))
-            
-            # Колонка 2: Артикул профиля (берем из первого распила)
-            profile_code = ""
-            if plan.cuts and len(plan.cuts) > 0:
-                first_cut = plan.cuts[0]
-                if isinstance(first_cut, dict) and 'profile_code' in first_cut:
-                    profile_code = first_cut['profile_code']
-            table.setItem(row, 2, _create_text_item(profile_code))
-            
-            table.setItem(row, 3, _create_text_item(cuts_text))
-            table.setItem(row, 4, _create_text_item(waste_display))
-            table.setItem(row, 5, _create_text_item(waste_percent_display))
-            table.setItem(row, 6, _create_numeric_item(remainder_length))
-            table.setItem(row, 7, _create_text_item(f"{remainder_percent:.1f}%"))
-            
-            # Колонка 8: ID делового остатка (warehouseremaindersid)
-            warehouseremaindersid_value = getattr(plan, 'warehouseremaindersid', None)
-            if warehouseremaindersid_value and plan.is_remainder:
-                table.setItem(row, 8, _create_text_item(f"ID: {warehouseremaindersid_value}"))
-            else:
-                table.setItem(row, 8, _create_text_item(""))
+            # 9. Отход (%)
+            waste_percent = (waste_length / plan.stock_length * 100) if plan.stock_length > 0 else 0
+            table.setItem(row, 8, _create_text_item(f"{waste_percent:.1f}%"))
             
             # Создаем детальный tooltip для всех планов
+            used_length = plan.get_used_length(5.0)
+            total_pieces_length = plan.get_total_pieces_length()
+            saw_width_total = 5.0 * (cuts_count - 1) if cuts_count > 1 else 0
+            
             tooltip_lines = [
                 f"📊 Детальная информация:",
                 f"Длина хлыста: {plan.stock_length:.0f}мм",
@@ -279,11 +261,11 @@ def fill_optimization_results_table(table: QTableWidget, cut_plans: list):
             
             # Добавляем информацию об отходах и остатках
             if remainder and remainder > 0:
-                tooltip_lines.append(f"🔨 Деловой остаток: {remainder:.0f}мм ({remainder_percent:.1f}%) - пригоден для использования")
-                tooltip_lines.append(f"🗑️ Отходы: {plan.waste:.0f}мм ({plan.waste_percent:.1f}%) - непригодный материал")
-                tooltip_lines.append(f"📏 Всего неиспользовано: {real_waste:.0f}мм")
+                tooltip_lines.append(f"🔨 Деловой остаток: {remainder_length:.0f}мм ({remainder_percent:.1f}%) - пригоден для использования")
+                tooltip_lines.append(f"🗑️ Отходы: {waste_length:.0f}мм ({waste_percent:.1f}%) - непригодный материал")
+                tooltip_lines.append(f"📏 Всего неиспользовано: {waste_length:.0f}мм")
             else:
-                tooltip_lines.append(f"🗑️ Отходы: {plan.waste:.0f}мм ({plan.waste_percent:.1f}%) - весь неиспользованный материал")
+                tooltip_lines.append(f"🗑️ Отходы: {waste_length:.0f}мм ({waste_percent:.1f}%) - весь неиспользованный материал")
                 tooltip_lines.append(f"🔨 Деловых остатков: нет (< {300}мм)")
             
             tooltip_lines.append(f"Статус: {'✅ Корректно' if is_valid else '❌ ОШИБКА - превышена длина хлыста!'}")
@@ -318,8 +300,8 @@ def fill_optimization_results_table(table: QTableWidget, cut_plans: list):
             table.setItem(row, 0, _create_text_item("ERROR"))
             table.setItem(row, 1, _create_text_item("ERROR"))
             table.setItem(row, 2, _create_text_item("ERROR"))
-            table.setItem(row, 3, _create_text_item(f"Ошибка: {str(e)}"))
-            table.setItem(row, 4, _create_text_item("ERROR"))
+            table.setItem(row, 3, _create_text_item("ERROR"))
+            table.setItem(row, 4, _create_text_item(f"Ошибка: {str(e)}"))
             table.setItem(row, 5, _create_text_item("ERROR"))
             table.setItem(row, 6, _create_text_item("ERROR"))
             table.setItem(row, 7, _create_text_item("ERROR"))
@@ -406,3 +388,91 @@ def get_selected_row_data(table: QTableWidget) -> dict:
             data[key] = item.text()
     
     return data
+
+
+def copy_table_to_clipboard(table: QTableWidget):
+    """Копирует всю таблицу в буфер обмена в текстовом формате"""
+    try:
+        if table.rowCount() == 0:
+            return False
+        
+        # Получаем заголовки
+        headers = []
+        for col in range(table.columnCount()):
+            header_item = table.horizontalHeaderItem(col)
+            headers.append(header_item.text() if header_item else f"Столбец {col + 1}")
+        
+        # Собираем данные
+        rows_data = []
+        
+        # Добавляем заголовки
+        rows_data.append("\t".join(headers))
+        
+        # Добавляем данные строк
+        for row in range(table.rowCount()):
+            row_data = []
+            for col in range(table.columnCount()):
+                item = table.item(row, col)
+                if item:
+                    row_data.append(item.text())
+                else:
+                    row_data.append("")
+            rows_data.append("\t".join(row_data))
+        
+        # Объединяем все в одну строку с переносами
+        table_text = "\n".join(rows_data)
+        
+        # Копируем в буфер обмена
+        clipboard = QApplication.clipboard()
+        clipboard.setText(table_text)
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error copying table to clipboard: {e}")
+        return False
+
+
+def copy_table_as_csv(table: QTableWidget):
+    """Копирует всю таблицу в буфер обмена в формате CSV"""
+    try:
+        if table.rowCount() == 0:
+            return False
+        
+        # Получаем заголовки
+        headers = []
+        for col in range(table.columnCount()):
+            header_item = table.horizontalHeaderItem(col)
+            headers.append(header_item.text() if header_item else f"Столбец {col + 1}")
+        
+        # Собираем данные
+        rows_data = []
+        
+        # Добавляем заголовки
+        rows_data.append(",".join(f'"{header}"' for header in headers))
+        
+        # Добавляем данные строк
+        for row in range(table.rowCount()):
+            row_data = []
+            for col in range(table.columnCount()):
+                item = table.item(row, col)
+                if item:
+                    # Экранируем кавычки и запятые
+                    cell_text = item.text().replace('"', '""')
+                    row_data.append(f'"{cell_text}"')
+                else:
+                    row_data.append('""')
+            rows_data.append(",".join(row_data))
+        
+        # Объединяем все в одну строку с переносами
+        csv_text = "\n".join(rows_data)
+        
+        # Копируем в буфер обмена
+        clipboard = QApplication.clipboard()
+        clipboard.setText(csv_text)
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error copying table as CSV: {e}")
+        return False

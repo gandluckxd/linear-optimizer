@@ -31,7 +31,8 @@ from .table_widgets import (
     _create_text_item, _create_numeric_item, setup_table_columns,
     fill_profiles_table, fill_stock_table, fill_optimization_results_table,
     fill_stock_remainders_table, fill_stock_materials_table,
-    update_table_column_widths, clear_table, enable_table_sorting
+    update_table_column_widths, clear_table, enable_table_sorting,
+    copy_table_to_clipboard, copy_table_as_csv
 )
 from .dialogs import DebugDialog, ProgressDialog, OptimizationSettingsDialog, ApiSettingsDialog
 from .config import MAIN_WINDOW_STYLE, TAB_STYLE, SPECIAL_BUTTON_STYLES, WIDGET_CONFIGS, COLORS
@@ -557,13 +558,34 @@ class LinearOptimizerWindow(QMainWindow):
         
         self.results_table = QTableWidget()
         setup_table_columns(self.results_table, [
-            'Хлыст (ID)', 'Длина хлыста (мм)', 'Артикул профиля', 'Распилы', 'Отход (мм)', 'Отход (%)', 'Остаток (мм)', 'Остаток (%)', 'ID остатка'
+            'Артикул', 'Длина хлыста (мм)', 'Количество хлыстов такого распила', 'Количество деталей на хлысте', 'Распил', 'Деловой остаток (мм)', 'Деловой остаток (%)', 'Отход (мм)', 'Отход (%)'
         ])
         
         # Включаем сортировку
         enable_table_sorting(self.results_table, True)
         self.results_table.setMinimumHeight(400)
         results_layout.addWidget(self.results_table)
+        
+        # Добавляем кнопки копирования таблицы
+        copy_buttons_layout = QHBoxLayout()
+        copy_buttons_layout.addStretch()
+        
+        # Кнопка копирования в текстовом формате
+        self.copy_table_button = QPushButton("📋 Копировать таблицу")
+        self.copy_table_button.setStyleSheet(SPECIAL_BUTTON_STYLES["copy"])
+        self.copy_table_button.clicked.connect(self.on_copy_table_clicked)
+        self.copy_table_button.setToolTip("Копирует всю таблицу плана распила в буфер обмена в текстовом формате")
+        copy_buttons_layout.addWidget(self.copy_table_button)
+        
+        # Кнопка копирования в формате CSV
+        self.copy_csv_button = QPushButton("📊 Копировать как CSV")
+        self.copy_csv_button.setStyleSheet(SPECIAL_BUTTON_STYLES["copy_csv"])
+        self.copy_csv_button.clicked.connect(self.on_copy_csv_clicked)
+        self.copy_csv_button.setToolTip("Копирует всю таблицу плана распила в буфер обмена в формате CSV")
+        copy_buttons_layout.addWidget(self.copy_csv_button)
+        
+        copy_buttons_layout.addStretch()
+        results_layout.addLayout(copy_buttons_layout)
         
         results_group.setLayout(results_layout)
         layout.addWidget(results_group)
@@ -595,6 +617,11 @@ class LinearOptimizerWindow(QMainWindow):
         self.stats_total_length = QLabel("0 м")
         self.stats_total_length.setStyleSheet(stats_style)
         left_layout.addRow("Общая длина:", self.stats_total_length)
+        
+        # Новая строка: распределено деталей
+        self.stats_distributed_pieces = QLabel("0/0")
+        self.stats_distributed_pieces.setStyleSheet(stats_style)
+        left_layout.addRow("Распределено деталей:", self.stats_distributed_pieces)
         
         stats_layout.addLayout(left_layout)
         
@@ -827,24 +854,27 @@ class LinearOptimizerWindow(QMainWindow):
             
             # Добавляем остатки
             for remainder in self.stock_remainders:
-                # Используем warehouseremaindersid как уникальный ID для делового остатка
-                # Создаем ОДИН объект Stock с правильным количеством
-                stock = Stock(
-                    id=getattr(remainder, 'warehouseremaindersid', stock_id),  # Используем warehouseremaindersid если есть
-                    profile_id=1,  # Базовый ID
-                    length=remainder.length,
-                    quantity=remainder.quantity_pieces,  # Количество палок этого остатка
-                    location="Остатки",
-                    is_remainder=True
-                )
-                # Добавляем атрибут profile_code для проверки артикулов в оптимизаторе
-                stock.profile_code = remainder.profile_code
-                # Добавляем warehouseremaindersid для отслеживания
-                stock.warehouseremaindersid = getattr(remainder, 'warehouseremaindersid', None)
-                # Добавляем groupgoods_thick для расчета количества в миллиметрах
-                stock.groupgoods_thick = getattr(remainder, 'groupgoods_thick', 6000)
-                self.stocks.append(stock)
-                stock_id += 1
+                # Для деловых остатков создаем ОТДЕЛЬНЫЙ объект Stock для каждой палки
+                # Это критически важно для правильного подсчета количества!
+                for i in range(remainder.quantity_pieces):
+                    stock = Stock(
+                        id=stock_id,  # Уникальный ID для каждой палки
+                        profile_id=1,  # Базовый ID
+                        length=remainder.length,
+                        quantity=1,  # КРИТИЧЕСКИ ВАЖНО: каждая палка = 1 штука
+                        location="Остатки",
+                        is_remainder=True
+                    )
+                    # Добавляем атрибут profile_code для проверки артикулов в оптимизаторе
+                    stock.profile_code = remainder.profile_code
+                    # Добавляем warehouseremaindersid для отслеживания
+                    stock.warehouseremaindersid = getattr(remainder, 'warehouseremaindersid', None)
+                    # Добавляем groupgoods_thick для расчета количества в миллиметрах
+                    stock.groupgoods_thick = getattr(remainder, 'groupgoods_thick', 6000)
+                    # Добавляем уникальный идентификатор экземпляра
+                    stock.instance_id = i + 1
+                    self.stocks.append(stock)
+                    stock_id += 1
             
             # Добавляем материалы
             for material in self.stock_materials:
@@ -982,6 +1012,32 @@ class LinearOptimizerWindow(QMainWindow):
             # Обновляем статистику деловых остатков
             self.stats_remainders_length.setText(f"{total_remainders / 1000:.1f} м")
             self.stats_remainders_percent.setText(f"{remainders_percent:.2f} %")
+
+            # Обновляем строку "Распределено деталей"
+            # Используем только данные из статистики результата оптимизации
+            total_pieces_needed = int(stats.get('total_pieces_needed', 0))
+            total_pieces_placed = int(stats.get('total_pieces_placed', 0))
+            
+                        # Если статистика из оптимизатора отсутствует, считаем заново
+            if total_pieces_needed == 0 and self.profiles:
+                try:
+                    total_pieces_needed = sum(int(getattr(p, 'quantity', 0)) for p in self.profiles)
+                except Exception as e:
+                    print(f"⚠️ Ошибка подсчета needed pieces: {e}")
+                    total_pieces_needed = 0
+
+            if total_pieces_placed == 0 and getattr(result, 'cut_plans', None):
+                try:
+                    total_pieces_placed = 0
+                    for plan in result.cut_plans:
+                        plan_count = int(getattr(plan, 'count', 1))
+                        plan_pieces = plan.get_cuts_count()
+                        total_pieces_placed += plan_pieces * plan_count
+                except Exception as e:
+                    print(f"⚠️ Ошибка подсчета placed pieces: {e}")
+                    total_pieces_placed = 0
+
+            self.stats_distributed_pieces.setText(f"{total_pieces_placed}/{total_pieces_needed}")
         except Exception as e:
             print(f"⚠️ Ошибка при обновлении статистики: {e}")
             # Устанавливаем значения по умолчанию
@@ -993,6 +1049,7 @@ class LinearOptimizerWindow(QMainWindow):
             self.stats_efficiency.setText("100.00 %")
             self.stats_remainders_length.setText("0.0 м")
             self.stats_remainders_percent.setText("0.00 %")
+            self.stats_distributed_pieces.setText("0/0")
 
     # ========== МЕТОДЫ МЕНЮ ==========
     
@@ -1301,6 +1358,30 @@ class LinearOptimizerWindow(QMainWindow):
         order_ids_str = ", ".join(map(str, order_ids))
         self.order_id_input.setText(order_ids_str)
         self.on_load_data_clicked()
+
+    def on_copy_table_clicked(self):
+        """Обработчик копирования таблицы в текстовом формате"""
+        try:
+            if copy_table_to_clipboard(self.results_table):
+                self.status_bar.showMessage("✅ Таблица скопирована в буфер обмена")
+                QMessageBox.information(self, "Копирование", "Таблица плана распила успешно скопирована в буфер обмена!\n\nТеперь вы можете вставить её в Excel, Word или любой другой документ.")
+            else:
+                QMessageBox.warning(self, "Ошибка копирования", "Не удалось скопировать таблицу. Возможно, таблица пуста.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка при копировании таблицы: {str(e)}")
+            self.status_bar.showMessage("❌ Ошибка копирования таблицы")
+
+    def on_copy_csv_clicked(self):
+        """Обработчик копирования таблицы в формате CSV"""
+        try:
+            if copy_table_as_csv(self.results_table):
+                self.status_bar.showMessage("✅ Таблица скопирована в буфер обмена как CSV")
+                QMessageBox.information(self, "Копирование CSV", "Таблица плана распила успешно скопирована в буфер обмена в формате CSV!\n\nТеперь вы можете вставить её в Excel, где она автоматически разделится по столбцам.")
+            else:
+                QMessageBox.warning(self, "Ошибка копирования", "Не удалось скопировать таблицу как CSV. Возможно, таблица пуста.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка при копировании таблицы как CSV: {str(e)}")
+            self.status_bar.showMessage("❌ Ошибка копирования таблицы как CSV")
 
     def closeEvent(self, event):
         """Обработка закрытия приложения"""

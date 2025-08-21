@@ -7,6 +7,25 @@ from typing import List, Dict, Optional
 from datetime import datetime
 
 @dataclass
+class Piece:
+    """Отдельная деталь для размещения на хлысте"""
+    profile_id: int
+    profile_code: str
+    length: float
+    element_name: str
+    order_id: int
+    piece_id: str  # Уникальный идентификатор детали
+    
+    # Состояние размещения
+    placed: bool = False
+    placed_in_stock_id: Optional[str] = None
+    placed_in_plan_index: Optional[int] = None
+    
+    def __post_init__(self):
+        if not self.piece_id:
+            self.piece_id = f"{self.profile_id}_{self.length}_{self.order_id}_{id(self)}"
+
+@dataclass
 class Profile:
     """Профиль для распила"""
     id: int
@@ -49,6 +68,7 @@ class Stock:
     is_remainder: bool = False  # Является ли остатком
     selected_quantity: int = 0  # Выбрано для распила
     warehouseremaindersid: Optional[int] = None  # ID делового остатка в таблице WAREHOUSEREMAINDER
+    profile_code: str = ""  # Артикул профиля
 
 @dataclass
 class CutPlan:
@@ -147,7 +167,7 @@ class OptimizationResult:
                 total_cuts += plan.get_cuts_count() * getattr(plan, 'count', 1)
                 total_length += plan.stock_length * getattr(plan, 'count', 1)
             
-            return {
+            base_stats = {
                 'total_stocks': total_stocks,
                 'total_cuts': total_cuts,
                 'total_length': total_length,
@@ -155,6 +175,13 @@ class OptimizationResult:
                 'waste_percent': self.total_waste_percent,
                 'avg_waste_per_stock': self.total_waste / total_stocks if total_stocks > 0 else 0
             }
+            # Добавляем/обновляем дополнительные статистики, если они были сохранены в процессе оптимизации
+            try:
+                if isinstance(self.statistics, dict) and self.statistics:
+                    base_stats.update(self.statistics)
+            except Exception as merge_err:
+                print(f"⚠️ Ошибка объединения статистики: {merge_err}")
+            return base_stats
         except Exception as e:
             print(f"⚠️ Ошибка в get_statistics: {e}")
             return {

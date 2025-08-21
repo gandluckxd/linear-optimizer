@@ -8,7 +8,7 @@ from .dialogs import DebugDialog, ProgressDialog, OptimizationSettingsDialog, Ap
 from .table_widgets import (
     setup_table_columns, fill_profiles_table, fill_stock_table,
     fill_optimization_results_table, update_table_column_widths,
-    clear_table, enable_table_sorting
+    clear_table, enable_table_sorting, copy_table_to_clipboard, copy_table_as_csv
 )
 from .config import (
     MAIN_WINDOW_STYLE, TAB_STYLE, DIALOG_STYLE, 
@@ -28,6 +28,8 @@ __all__ = [
     'update_table_column_widths',
     'clear_table',
     'enable_table_sorting',
+    'copy_table_to_clipboard',
+    'copy_table_as_csv',
     'MAIN_WINDOW_STYLE',
     'TAB_STYLE',
     'DIALOG_STYLE',

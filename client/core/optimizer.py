@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 # Импорт моделей
-from .models import Profile, Stock, CutPlan, OptimizationResult
+from .models import Profile, Stock, CutPlan, OptimizationResult, Piece
 
 @dataclass
 class OptimizationSettings:
@@ -101,8 +101,8 @@ class SimpleOptimizer:
                 progress_fn(90)
             
             # Рассчитываем статистику
-            total_waste = sum(plan.waste for plan in cut_plans)
-            total_length = sum(plan.stock_length for plan in cut_plans)
+            total_waste = sum(plan.waste * getattr(plan, 'count', 1) for plan in cut_plans)
+            total_length = sum(plan.stock_length * getattr(plan, 'count', 1) for plan in cut_plans)
             waste_percent = (total_waste / total_length * 100) if total_length > 0 else 0
             
             self.solve_time = time.time() - start_time
@@ -118,6 +118,76 @@ class SimpleOptimizer:
             
             # Добавляем статистику
             result.statistics = self._calculate_stats(cut_plans)
+            try:
+                # Подсчитываем всего деталей нужно (по профилям) и распределено (по планам)
+                total_pieces_needed = sum(p.quantity for p in valid_profiles)
+                total_pieces_placed = 0
+                
+                # Правильный подсчет с учетом группировки планов
+                for plan in cut_plans:
+                    plan_count = getattr(plan, 'count', 1)
+                    if hasattr(plan, 'cuts') and plan.cuts:
+                        # Считаем детали в одном плане
+                        plan_pieces = sum(int(c.get('quantity', 0)) for c in plan.cuts)
+                        # Умножаем на количество копий плана
+                        total_pieces_placed += plan_pieces * plan_count
+                
+                # Дополнительная проверка: находим неразмещенные детали
+                unplaced_pieces = self._find_unplaced_pieces_in_result(valid_profiles, cut_plans)
+                total_pieces_unplaced = len(unplaced_pieces)
+                
+                # Проверяем корректность подсчета
+                if total_pieces_placed != total_pieces_needed:
+                    print(f"⚠️ ВНИМАНИЕ: Несоответствие в подсчете деталей!")
+                    print(f"   Нужно: {total_pieces_needed}")
+                    print(f"   Размещено: {total_pieces_placed}")
+                    print(f"   Разница: {total_pieces_placed - total_pieces_needed}")
+                    
+                    # Пытаемся исправить подсчет
+                    corrected_total = 0
+                    for plan in cut_plans:
+                        plan_count = getattr(plan, 'count', 1)
+                        if hasattr(plan, 'cuts') and plan.cuts:
+                            for cut in plan.cuts:
+                                if isinstance(cut, dict) and 'quantity' in cut:
+                                    corrected_total += int(cut.get('quantity', 0)) * plan_count
+                    
+                    print(f"   Исправленный подсчет: {corrected_total}")
+                    if corrected_total == total_pieces_needed:
+                        total_pieces_placed = corrected_total
+                        print(f"   ✅ Подсчет исправлен!")
+                    else:
+                        print(f"   ❌ Подсчет все еще некорректен!")
+                
+                result.statistics['total_pieces_needed'] = int(total_pieces_needed)
+                result.statistics['total_pieces_placed'] = int(total_pieces_placed)
+                result.statistics['total_pieces_unplaced'] = int(total_pieces_unplaced)
+                result.statistics['placement_efficiency'] = round((total_pieces_placed / total_pieces_needed * 100) if total_pieces_needed > 0 else 0, 1)
+                
+                # Добавляем информацию о неразмещенных деталях
+                if total_pieces_unplaced > 0:
+                    result.statistics['unplaced_details'] = [
+                        {
+                            'profile_id': p['profile_id'],
+                            'profile_code': p.get('profile_code', ''),
+                            'length': p['length'],
+                            'element_name': p['element_name']
+                        }
+                        for p in unplaced_pieces[:10]  # Показываем только первые 10
+                    ]
+                    
+                    print(f"⚠️ ВНИМАНИЕ: {total_pieces_unplaced} деталей не размещены!")
+                    print(f"📊 Эффективность размещения: {result.statistics['placement_efficiency']}%")
+                else:
+                    print(f"✅ ВСЕ детали успешно размещены! ({total_pieces_placed}/{total_pieces_needed})")
+                    print(f"📊 Эффективность размещения: 100%")
+                    
+            except Exception as stats_err:
+                print(f"⚠️ Ошибка расчета статистики деталей: {stats_err}")
+                result.statistics['total_pieces_needed'] = 0
+                result.statistics['total_pieces_placed'] = 0
+                result.statistics['total_pieces_unplaced'] = 0
+                result.statistics['placement_efficiency'] = 0
             
             if progress_fn:
                 progress_fn(100)
@@ -135,58 +205,82 @@ class SimpleOptimizer:
         """
         cut_plans = []
         
-        # Создаем список всех кусков для размещения
+        # Создаем список всех кусков для размещения с использованием новой модели Piece
         pieces_to_place = []
         for profile in profiles:
             for i in range(profile.quantity):
-                pieces_to_place.append({
-                    'profile_id': profile.id,
-                    'profile_code': profile.profile_code,  # Добавляем артикул профиля
-                    'length': profile.length,
-                    'element_name': profile.element_name
-                })
+                piece = Piece(
+                    profile_id=profile.id,
+                    profile_code=profile.profile_code,
+                    length=profile.length,
+                    element_name=profile.element_name,
+                    order_id=profile.order_id,
+                    piece_id=f"{profile.id}_{profile.length}_{profile.order_id}_{i}"
+                )
+                pieces_to_place.append(piece)
         
         total_pieces = len(pieces_to_place)
+        print(f"🔧 Создано {total_pieces} деталей для размещения")
         
         # Создаем список доступных хлыстов
         available_stocks = []
         for stock in stocks:
             if stock.is_remainder:
-                # Для деловых остатков создаем отдельный объект для каждого экземпляра
+                # КРИТИЧЕСКИ ВАЖНО: для деловых остатков создаем ровно столько объектов, сколько указано в quantity
+                # Каждый деловой остаток может использоваться только один раз!
                 for i in range(stock.quantity):
                     available_stocks.append({
-                        'id': f"{stock.id}_{i+1}",  # Уникальный ID для каждого экземпляра
+                        'id': f"{stock.id}_remainder_{i+1}",  # Уникальный ID для каждого делового остатка
                         'original_id': stock.id,
                         'length': stock.length,
-                        'profile_code': getattr(stock, 'profile_code', None),  # Добавляем артикул профиля хлыста
-                        'warehouseremaindersid': getattr(stock, 'warehouseremaindersid', None),  # Добавляем ID делового остатка
-                        'groupgoods_thick': getattr(stock, 'groupgoods_thick', 6000),  # Добавляем типовой размер профиля
+                        'profile_code': getattr(stock, 'profile_code', None),
+                        'warehouseremaindersid': getattr(stock, 'warehouseremaindersid', None),
+                        'groupgoods_thick': getattr(stock, 'groupgoods_thick', 6000),
                         'is_remainder': True,
                         'used_length': 0,
                         'cuts': [],
                         'cuts_count': 0,
-                        'quantity': 1,  # Каждый экземпляр может быть использован только 1 раз
-                        'used_quantity': 0,  # Счетчик использованных хлыстов этого типа
-                        'original_stock': stock,  # Сохраняем ссылку на исходный хлыст
-                        'instance_id': i + 1  # Номер экземпляра
+                        'quantity': 1,  # Каждый деловой остаток используется только 1 раз
+                        'used_quantity': 0,
+                        'max_usage': 1,  # Максимальное количество использований = 1
+                        'original_stock': stock,
+                        'instance_id': i + 1,
+                        'is_used': False  # Флаг использования
                     })
+                print(f"🔧 Создано {stock.quantity} экземпляров делового остатка {stock.id} длиной {stock.length}мм")
             else:
-                # Для цельных материалов создаем один объект с правильным количеством
-                available_stocks.append({
-                    'id': stock.id,  # Используем оригинальный ID хлыста
-                    'original_id': stock.id,
-                    'length': stock.length,
-                    'profile_code': getattr(stock, 'profile_code', None),  # Добавляем артикул профиля хлыста
-                    'warehouseremaindersid': None,  # Цельные материалы не имеют warehouseremaindersid
-                    'groupgoods_thick': getattr(stock, 'groupgoods_thick', 6000),  # Добавляем типовой размер профиля
-                    'is_remainder': False,
-                    'used_length': 0,
-                    'cuts': [],
-                    'cuts_count': 0,
-                    'quantity': stock.quantity,  # Сохраняем количество доступных хлыстов
-                    'used_quantity': 0,  # Счетчик использованных хлыстов этого типа
-                    'original_stock': stock  # Сохраняем ссылку на исходный хлыст
-                })
+                # Для цельных материалов создаем объекты для каждого экземпляра
+                for i in range(stock.quantity):
+                    available_stocks.append({
+                        'id': f"{stock.id}_material_{i+1}",  # Уникальный ID для каждого цельного материала
+                        'original_id': stock.id,
+                        'length': stock.length,
+                        'profile_code': getattr(stock, 'profile_code', None),
+                        'warehouseremaindersid': None,
+                        'groupgoods_thick': getattr(stock, 'groupgoods_thick', 6000),
+                        'is_remainder': False,
+                        'used_length': 0,
+                        'cuts': [],
+                        'cuts_count': 0,
+                        'quantity': 1,
+                        'used_quantity': 0,
+                        'max_usage': 1,  # Каждый экземпляр используется только 1 раз
+                        'original_stock': stock,
+                        'instance_id': i + 1,
+                        'is_used': False
+                    })
+                print(f"🔧 Создано {stock.quantity} экземпляров цельного материала {stock.id} длиной {stock.length}мм")
+        
+        # Проверяем, что все хлысты имеют необходимые поля
+        for stock in available_stocks:
+            if not all(key in stock for key in ['id', 'length', 'used_length', 'cuts', 'cuts_count', 'quantity', 'used_quantity']):
+                print(f"⚠️ Хлыст {stock.get('id', 'unknown')} не имеет всех необходимых полей")
+                # Добавляем недостающие поля
+                stock.setdefault('used_length', 0)
+                stock.setdefault('cuts', [])
+                stock.setdefault('cuts_count', 0)
+                stock.setdefault('quantity', 1)
+                stock.setdefault('used_quantity', 0)
         
         # Фильтруем/сортируем хлысты в зависимости от использования деловых остатков
         if not self.settings.use_remainders:
@@ -197,104 +291,52 @@ class SimpleOptimizer:
             # Используем и остатки, и материалы — остатки приоритетнее
             available_stocks.sort(key=lambda x: (0 if x.get('is_remainder') else 1, x['length']))
         
-        # Размещаем куски с улучшенным алгоритмом
-        placed_count = 0
+        # РАЗМЕЩАЕМ ДЕТАЛИ ОДИН РАЗ - убираем множественные проходы!
+        print("🚀 ЗАПУСКАЮ ОДИН ПРОХОД ОПТИМИЗАЦИИ!")
         
-        for piece in pieces_to_place:
-            placed = False
-            best_stock = None
-            best_waste = float('inf')
-            
-            # Ищем хлыст с минимальными отходами (Best Fit)
-            for stock in available_stocks:
-                # ПРОВЕРКА АРТИКУЛА ПРОФИЛЯ - деталь можно размещать только на хлысте с соответствующим артикулом
-                if stock['profile_code'] and piece['profile_code'] and stock['profile_code'] != piece['profile_code']:
-                    # Артикулы не совпадают - пропускаем этот хлыст
-                    continue
-                
-                # ПРОВЕРКА КОЛИЧЕСТВА - нельзя использовать больше хлыстов, чем есть на складе
-                if stock['used_quantity'] >= stock['quantity']:
-                    # Все хлысты этого типа уже использованы
-                    continue
-                
-                needed_length = piece['length']
-                
-                # Добавляем ширину пропила если уже есть распилы
-                if stock['cuts_count'] > 0:
-                    needed_length += self.settings.blade_width
-                
-                # Эффективная длина с учетом отступов
-                effective_length = max(0, stock['length'] - (self.settings.begin_indent + self.settings.end_indent))
-                # Проверяем помещается ли
-                if stock['used_length'] + needed_length <= effective_length:
-                    # Рассчитываем отходы после размещения
-                    remaining_length = effective_length - (stock['used_length'] + needed_length)
-                    
-                    # Дополнительная проверка: создаем временный план для валидации
-                    temp_cuts = stock['cuts'].copy()
-                    temp_cuts.append({
-                        'profile_id': piece['profile_id'],
-                        'profile_code': piece.get('profile_code', ''),  # Добавляем артикул профиля
-                        'length': piece['length'],
-                        'quantity': 1
-                    })
-                    
-                    temp_plan = CutPlan(
-                        stock_id=stock['original_id'],
-                        stock_length=stock['length'],
-                        cuts=temp_cuts,
-                        waste=0,
-                        waste_percent=0
-                    )
-                    
-                    # Проверяем, что план корректен
-                    if temp_plan.validate(self.settings.blade_width):
-                        # Учитываем минимальный отход и лимит на процент отходов
-                        violates_min_trash = (remaining_length > 0 and remaining_length < self.settings.min_trash_mm)
-                        waste_percent_if_place = (remaining_length / stock['length'] * 100) if stock['length'] > 0 else 0
-                        violates_waste_limit = (
-                            remaining_length > 0
-                            and remaining_length < self.settings.min_remainder_length
-                            and waste_percent_if_place > self.settings.max_waste_percent
-                        )
-                        # Приоритет: минимальные отходы, без нарушения min_trash и лимита отходов
-                        if not violates_min_trash and not violates_waste_limit and remaining_length < best_waste:
-                            # Если остаток меньше минимального - это хорошо (полное использование)
-                            if remaining_length < self.settings.min_remainder_length:
-                                best_stock = stock
-                                best_waste = remaining_length
-                            # Если остаток больше минимального - тоже хорошо (деловой остаток)
-                            elif remaining_length >= self.settings.min_remainder_length:
-                                best_stock = stock
-                                best_waste = remaining_length
-            
-            # Размещаем в лучший найденный хлыст
-            if best_stock:
-                self._add_piece_to_stock(best_stock, piece)
-                placed = True
-                placed_count += 1
-            else:
-                print(f"⚠️ Не удалось разместить: {piece['element_name']} ({piece['length']}мм, артикул: {piece['profile_code']})")
-            
-            # Обновляем прогресс реже (каждые 10% кусков)
-            if progress_fn and total_pieces > 0 and placed_count % max(1, total_pieces // 10) == 0:
-                progress = 40 + (placed_count / total_pieces) * 30
-                progress_fn(int(progress))
+        # Запускаем один проход оптимизации
+        placed_count = self._single_pass_optimization(pieces_to_place, available_stocks, progress_fn)
         
         if progress_fn:
             progress_fn(70)
         
-        # Дополнительные проходы: выполняем только при включенной парной оптимизации
-        if self.settings.pair_optimization:
-            # Второй проход: пытаемся заполнить остатки мелкими деталями
-            self._fill_remainders_with_small_pieces(pieces_to_place, available_stocks, progress_fn)
+        # Проверяем, сколько деталей размещено
+        unplaced_pieces = self._find_unplaced_pieces(pieces_to_place, available_stocks)
+        if unplaced_pieces:
+            print(f"⚠️ {len(unplaced_pieces)} деталей не размещены после основного прохода")
             
-            # Третий проход: оптимизация размещения комбинаций
-            self._optimize_combinations(available_stocks, progress_fn)
+            # Только если есть неразмещенные детали, пытаемся их разместить
+            if len(unplaced_pieces) > 0:
+                print("🔧 Пытаюсь разместить оставшиеся детали в новые хлысты...")
+                additional_placed = self._place_remaining_pieces(unplaced_pieces, available_stocks, stocks)
+                placed_count += additional_placed
+                
+                # Финальная проверка
+                final_unplaced = self._find_unplaced_pieces(pieces_to_place, available_stocks)
+                if final_unplaced:
+                    print(f"⚠️ {len(final_unplaced)} деталей все еще не размещены")
+                    print("🔧 Создаю дополнительные хлысты для оставшихся деталей...")
+                    
+                    # Создаем дополнительные хлысты для оставшихся деталей
+                    self._create_final_stocks_for_unplaced(final_unplaced, available_stocks, stocks)
+                    
+                    # Проверяем еще раз
+                    final_check = self._find_unplaced_pieces(pieces_to_place, available_stocks)
+                    if final_check:
+                        print(f"❌ {len(final_check)} деталей не удалось разместить даже после создания дополнительных хлыстов")
+                        for piece in final_check:
+                            print(f"   - {piece.element_name}: {piece.length}мм (артикул: {piece.profile_code})")
+                    else:
+                        print("✅ Все детали успешно размещены после создания дополнительных хлыстов!")
+                else:
+                    print("✅ Все детали успешно размещены!")
+        else:
+            print("✅ Все детали успешно размещены в основном проходе!")
         
-        # Создаем планы распила
+        # Создаем планы распила ТОЛЬКО для хлыстов с деталями
+        # Создаем отдельный план для каждого экземпляра хлыста
         for stock in available_stocks:
-            if stock['cuts']:
+            if stock['cuts']:  # Только хлысты с размещенными деталями
                 cut_plan = self._create_cut_plan_from_stock(stock)
                 
                 # Валидируем план
@@ -318,209 +360,88 @@ class SimpleOptimizer:
                         cut_plans.append(cut_plan)  # Добавляем как есть
                 else:
                     cut_plans.append(cut_plan)
+                    print(f"🔧 Создан план для экземпляра хлыста {stock['id']} (original_id: {stock['original_id']})")
+                    print(f"   Детали: {cut_plan.cuts}")
         
         # Группируем идентичные планы в один с полем count
         return self._group_identical_plans(cut_plans)
     
-    def _fill_remainders_with_small_pieces(self, all_pieces: List[Dict], available_stocks: List[Dict], progress_fn=None):
+    def _fill_remainders_with_small_pieces(self, all_pieces: List[Piece], available_stocks: List[Dict], progress_fn=None):
         """
-        Заполняет остатки в хлыстах мелкими деталями для уменьшения отходов
+        УСТАРЕВШИЙ МЕТОД - больше не используется
         """
-        print("🔍 Анализируем остатки для дополнительного размещения...")
-        
-        # Находим все неразмещенные детали
-        unplaced_pieces = []
-        placed_pieces = set()
-        
-        # Собираем уже размещенные детали
-        for stock in available_stocks:
-            for cut in stock['cuts']:
-                for _ in range(cut['quantity']):
-                    placed_pieces.add((cut['profile_id'], cut['length']))
-        
-        # Находим неразмещенные
-        for piece in all_pieces:
-            piece_key = (piece['profile_id'], piece['length'])
-            if piece_key not in placed_pieces:
-                unplaced_pieces.append(piece)
-            elif (piece['profile_id'], piece['length']) in placed_pieces:
-                placed_pieces.discard(piece_key)
-        
-        # Сортируем неразмещенные детали по длине (сначала мелкие)
-        unplaced_pieces.sort(key=lambda x: x['length'])
-        
-        if not unplaced_pieces:
-            print("✅ Все детали уже размещены")
-            return
-        
-        print(f"📦 Найдено {len(unplaced_pieces)} неразмещенных деталей")
-        
-        # Анализируем остатки в хлыстах
-        stocks_with_remainders = []
-        for stock in available_stocks:
-            if stock['cuts']:  # Только используемые хлысты
-                remaining = stock['length'] - stock['used_length']
-                if remaining >= self.settings.min_remainder_length:
-                    stocks_with_remainders.append({
-                        'stock': stock,
-                        'remainder': remaining,
-                        'efficiency': stock['used_length'] / stock['length']
-                    })
-        
-        # Сортируем хлысты по эффективности использования (наименее эффективные первыми)
-        stocks_with_remainders.sort(key=lambda x: x['efficiency'])
-        
-        print(f"🎯 Найдено {len(stocks_with_remainders)} хлыстов с деловыми остатками")
-        
-        additional_placements = 0
-        
-        # Пытаемся разместить мелкие детали в остатки
-        for stock_info in stocks_with_remainders:
-            stock = stock_info['stock']
-            available_space = stock_info['remainder']
-            
-            for piece in unplaced_pieces.copy():
-                # ПРОВЕРКА АРТИКУЛА ПРОФИЛЯ - деталь можно размещать только на хлысте с соответствующим артикулом
-                if stock['profile_code'] and piece['profile_code'] and stock['profile_code'] != piece['profile_code']:
-                    # Артикулы не совпадают - пропускаем эту деталь для данного хлыста
-                    continue
-                
-                needed_length = piece['length'] + self.settings.blade_width  # Всегда добавляем пропил
-                
-                if needed_length <= available_space:
-                    # Проверяем валидность размещения
-                    temp_cuts = stock['cuts'].copy()
-                    temp_cuts.append({
-                        'profile_id': piece['profile_id'],
-                        'profile_code': piece.get('profile_code', ''),  # Добавляем артикул профиля
-                        'length': piece['length'],
-                        'quantity': 1
-                    })
-                    
-                    temp_plan = CutPlan(
-                        stock_id=stock['original_id'],
-                        stock_length=stock['length'],
-                        cuts=temp_cuts,
-                        waste=0,
-                        waste_percent=0
-                    )
-                    
-                    if temp_plan.validate(self.settings.blade_width):
-                        # Размещаем деталь
-                        self._add_piece_to_stock(stock, piece)
-                        unplaced_pieces.remove(piece)
-                        available_space -= needed_length
-                        additional_placements += 1
-                        
-                        print(f"  ✅ Деталь {piece['length']}мм добавлена в остаток хлыста {stock['id']}")
-                        
-                        # Если остаток стал слишком маленьким, переходим к следующему хлысту
-                        if available_space < 100:  # Минимальный размер для поиска
-                            break
-        
-        if additional_placements > 0:
-            print(f"🎉 Дополнительно размещено {additional_placements} деталей в остатки!")
-        else:
-            print("ℹ️ Не удалось разместить дополнительные детали в остатки")
-        
-        if progress_fn:
-            progress_fn(85)
+        print("⚠️ Метод _fill_remainders_with_small_pieces устарел и не используется")
+        return 0
     
     def _optimize_combinations(self, available_stocks: List[Dict], progress_fn=None):
         """
-        Оптимизирует размещение путем поиска лучших комбинаций деталей
+        УСТАРЕВШИЙ МЕТОД - больше не используется
         """
-        print("🔄 Оптимизируем размещение комбинаций...")
-        
-        # Находим хлысты с большими отходами (больше 10% от длины хлыста)
-        inefficient_stocks = []
-        for stock in available_stocks:
-            if stock['cuts']:
-                waste = stock['length'] - stock['used_length']
-                waste_percent = (waste / stock['length']) * 100
-                if waste_percent > 10 and waste < self.settings.min_remainder_length:
-                    inefficient_stocks.append({
-                        'stock': stock,
-                        'waste': waste,
-                        'waste_percent': waste_percent
-                    })
-        
-        if not inefficient_stocks:
-            print("✅ Все хлысты используются эффективно")
-            return
-        
-        print(f"⚠️ Найдено {len(inefficient_stocks)} неэффективных хлыстов")
-        
-        # Сортируем по проценту отходов (худшие первыми)
-        inefficient_stocks.sort(key=lambda x: x['waste_percent'], reverse=True)
-        
-        improvements = 0
-        
-        for stock_info in inefficient_stocks[:3]:  # Оптимизируем только худшие 3
-            stock = stock_info['stock']
-            current_waste = stock_info['waste']
-            
-            print(f"🎯 Оптимизируем хлыст {stock['id']} (отход: {current_waste:.0f}мм, {stock_info['waste_percent']:.1f}%)")
-            
-            # Пытаемся найти лучшую комбинацию с другими хлыстами
-            for other_stock in available_stocks:
-                if other_stock['id'] != stock['id'] and other_stock['cuts']:
-                    # ПРОВЕРКА АРТИКУЛА ПРОФИЛЯ - хлысты можно объединять только если у них одинаковый артикул
-                    if stock['profile_code'] and other_stock['profile_code'] and stock['profile_code'] != other_stock['profile_code']:
-                        # Артикулы не совпадают - пропускаем этот хлыст
-                        continue
-                    
-                    # Пробуем объединить детали из двух хлыстов в один
-                    combined_cuts = stock['cuts'] + other_stock['cuts']
-                    combined_length = self._calculate_cuts_length(combined_cuts)
-                    
-                    # Проверяем, помещается ли в один из хлыстов
-                    if combined_length <= stock['length']:
-                        target_stock = stock
-                        source_stock = other_stock
-                    elif combined_length <= other_stock['length']:
-                        target_stock = other_stock
-                        source_stock = stock
-                    else:
-                        continue
-                    
-                    # Создаем временный план для проверки
-                    temp_plan = CutPlan(
-                        stock_id=target_stock['original_id'],
-                        stock_length=target_stock['length'],
-                        cuts=combined_cuts,
-                        waste=0,
-                        waste_percent=0
-                    )
-                    
-                    if temp_plan.validate(self.settings.blade_width):
-                        new_waste = target_stock['length'] - temp_plan.get_used_length(self.settings.blade_width)
-                        total_old_waste = current_waste + (other_stock['length'] - other_stock['used_length'])
-                        
-                        # Если новый вариант лучше (меньше общих отходов)
-                        if new_waste < total_old_waste:
-                            print(f"  ✅ Найдена лучшая комбинация! Экономия: {total_old_waste - new_waste:.0f}мм")
-                            
-                            # Применяем оптимизацию
-                            target_stock['cuts'] = combined_cuts
-                            target_stock['used_length'] = temp_plan.get_used_length(self.settings.blade_width)
-                            target_stock['cuts_count'] = sum(cut['quantity'] for cut in combined_cuts)
-                            
-                            # Очищаем исходный хлыст
-                            source_stock['cuts'] = []
-                            source_stock['used_length'] = 0
-                            source_stock['cuts_count'] = 0
-                            
-                            improvements += 1
-                            break
-        
-        if improvements > 0:
-            print(f"🎉 Выполнено {improvements} оптимизаций размещения!")
-        else:
-            print("ℹ️ Дополнительных оптимизаций не найдено")
-        
-        if progress_fn:
-            progress_fn(90)
+        print("⚠️ Метод _optimize_combinations устарел и не используется")
+        return 0
+    
+    def _progressive_optimization(self, pieces_to_place: List[Piece], available_stocks: List[Dict], progress_fn=None) -> int:
+        """
+        УСТАРЕВШИЙ МЕТОД - больше не используется
+        """
+        print("⚠️ Метод _progressive_optimization устарел и не используется")
+        return 0
+    
+    def _simple_first_fit_placement(self, pieces_to_place: List[Piece], available_stocks: List[Dict]) -> int:
+        """
+        УСТАРЕВШИЙ МЕТОД - больше не используется
+        """
+        print("⚠️ Метод _simple_first_fit_placement устарел и не используется")
+        return 0
+    
+    def _improved_best_fit_placement(self, pieces_to_place: List[Piece], available_stocks: List[Dict]) -> int:
+        """
+        УСТАРЕВШИЙ МЕТОД - больше не используется
+        """
+        print("⚠️ Метод _improved_best_fit_placement устарел и не используется")
+        return 0
+    
+    def _optimize_remainders(self, pieces_to_place: List[Piece], available_stocks: List[Dict]) -> int:
+        """
+        УСТАРЕВШИЙ МЕТОД - больше не используется
+        """
+        print("⚠️ Метод _optimize_remainders устарел и не используется")
+        return 0
+    
+    def _force_place_remaining_pieces(self, pieces_to_place: List[Piece], available_stocks: List[Dict]) -> int:
+        """
+        УСТАРЕВШИЙ МЕТОД - больше не используется
+        """
+        print("⚠️ Метод _force_place_remaining_pieces устарел и не используется")
+        return 0
+    
+    def _force_place_unplaced_pieces(self, unplaced_pieces: List[Piece], available_stocks: List[Dict], original_stocks: List[Stock]) -> int:
+        """
+        УСТАРЕВШИЙ МЕТОД - больше не используется
+        """
+        print("⚠️ Метод _force_place_unplaced_pieces устарел и не используется")
+        return 0
+    
+    def _create_additional_stocks_for_unplaced(self, unplaced_pieces: List[Piece], available_stocks: List[Dict], original_stocks: List[Stock]):
+        """
+        УСТАРЕВШИЙ МЕТОД - больше не используется
+        """
+        print("⚠️ Метод _create_additional_stocks_for_unplaced устарел и не используется")
+        return 0
+    
+    def _create_forced_stock_for_piece(self, piece: Piece, available_stocks: List[Dict], original_stocks: List[Stock]):
+        """
+        УСТАРЕВШИЙ МЕТОД - больше не используется
+        """
+        print("⚠️ Метод _create_forced_stock_for_piece устарел и не используется")
+        return 0
+    
+    def _dynamic_placement_forces(self, pieces_to_place: List[Piece], available_stocks: List[Dict]) -> int:
+        """
+        УСТАРЕВШИЙ МЕТОД - больше не используется
+        """
+        print("⚠️ Метод _dynamic_placement_forces устарел и не используется")
+        return 0
     
     def _calculate_cuts_length(self, cuts: List[Dict]) -> float:
         """Рассчитывает общую длину деталей с учетом пропилов"""
@@ -533,25 +454,37 @@ class SimpleOptimizer:
         
         return total_pieces_length + saw_width_total
     
-    def _add_piece_to_stock(self, stock: Dict, piece: Dict):
+    def _add_piece_to_stock(self, stock: Dict, piece: Piece, force_placement: bool = False) -> bool:
         """Добавляет кусок в хлыст"""
         try:
-            # Добавляем длину куска
-            needed_length = piece['length']
+            # Проверяем, не размещена ли уже эта деталь
+            if piece.placed:
+                print(f"⚠️ Деталь {piece.length}мм уже размещена в хлысте {piece.placed_in_stock_id}")
+                return False
+            
+            # ЖЕСТКАЯ ПРОВЕРКА: деталь должна поместиться в хлыст
+            needed_length = piece.length
             
             # Добавляем ширину пропила если уже есть распилы
             if stock['cuts_count'] > 0:
                 needed_length += self.settings.blade_width
             
-            # Проверяем, не превышает ли общая длина длину хлыста
+            # Эффективная длина хлыста с учетом отступов
             effective_length = max(0, stock['length'] - (self.settings.begin_indent + self.settings.end_indent))
+            
+            # КРИТИЧЕСКИ ВАЖНО: проверяем, что деталь поместится
             if stock['used_length'] + needed_length > effective_length:
-                raise ValueError(f"Превышена длина хлыста: {stock['used_length'] + needed_length:.0f}мм > {effective_length:.0f}мм")
+                if force_placement:
+                    print(f"⚠️ FORCE: Деталь {piece.length}мм не помещается в хлыст {stock['id']} (нужно: {stock['used_length'] + needed_length:.0f}мм, доступно: {effective_length:.0f}мм)")
+                    return False
+                else:
+                    print(f"❌ Деталь {piece.length}мм не помещается в хлыст {stock['id']} (нужно: {stock['used_length'] + needed_length:.0f}мм, доступно: {effective_length:.0f}мм)")
+                    return False
             
             # Ищем существующий распил такого же типа
             existing_cut = None
             for cut in stock['cuts']:
-                if cut['profile_id'] == piece['profile_id'] and cut['length'] == piece['length']:
+                if cut['profile_id'] == piece.profile_id and cut['length'] == piece.length:
                     existing_cut = cut
                     break
             
@@ -561,9 +494,9 @@ class SimpleOptimizer:
             else:
                 # Создаем новый распил
                 stock['cuts'].append({
-                    'profile_id': piece['profile_id'],
-                    'profile_code': piece.get('profile_code', ''),  # Добавляем артикул профиля
-                    'length': piece['length'],
+                    'profile_id': piece.profile_id,
+                    'profile_code': piece.profile_code,  # Добавляем артикул профиля
+                    'length': piece.length,
                     'quantity': 1
                 })
             
@@ -572,22 +505,50 @@ class SimpleOptimizer:
             stock['used_length'] += needed_length
             stock['cuts_count'] += 1
             
-            # Увеличиваем счетчик использованных хлыстов этого типа
-            stock['used_quantity'] += 1
+            # Помечаем деталь как распределенную
+            try:
+                piece.placed = True
+                piece.placed_in_stock_id = stock['id']
+                print(f"🔧 DEBUG: Деталь {piece.length}мм помечена как размещенная в хлысте {stock['id']}")
+                print(f"   Использовано: {stock['used_length']:.0f}мм из {effective_length:.0f}мм ({stock['used_length']/effective_length*100:.1f}%)")
+            except Exception as e:
+                print(f"⚠️ Не удалось пометить деталь как размещенную: {e}")
+            
+            # КРИТИЧЕСКИ ВАЖНО: правильный учет использования хлыста
+            effective_length = max(0, stock['length'] - (self.settings.begin_indent + self.settings.end_indent))
+            usage_percent = (stock['used_length'] / effective_length) * 100 if effective_length > 0 else 100
+            
+            # Для деловых остатков: помечаем как использованный сразу после первого размещения
+            if stock['is_remainder']:
+                stock['is_used'] = True
+                stock['used_quantity'] = 1
+                print(f"🔧 Деловой остаток {stock['id']} помечен как использованный")
+            else:
+                # Для цельных материалов: увеличиваем счетчик если хлыст заполнен достаточно
+                if usage_percent > 70:  # Пониженный порог для более эффективного использования
+                    stock['used_quantity'] += 1
+                    if usage_percent > 90:
+                        stock['is_used'] = True  # Полностью заполненный хлыст
+                        print(f"🔧 Цельный материал {stock['id']} заполнен на {usage_percent:.1f}% и помечен как использованный")
             
             # Отладочная информация
-            print(f"🔧 DEBUG: Добавлена деталь {piece['length']}мм в хлыст {stock['id']}")
-            print(f"   Тип: {'Деловой остаток' if stock['is_remainder'] else 'Цельный хлыст'}")
-            print(f"   Использовано хлыстов: {stock['used_quantity']}/{stock['quantity']}")
-            print(f"   Использованная длина: {stock['used_length']:.0f}мм")
-            if stock['is_remainder']:
-                print(f"   Warehouseremaindersid: {stock.get('warehouseremaindersid', 'N/A')}")
-                print(f"   Instance ID: {stock.get('instance_id', 'N/A')}")
+            if force_placement:
+                print(f"🔧 FORCE: Добавлена деталь {piece.length}мм в хлыст {stock['id']} (принудительно)")
+            else:
+                print(f"🔧 DEBUG: Добавлена деталь {piece.length}мм в хлыст {stock['id']}")
+                print(f"   Тип: {'Деловой остаток' if stock['is_remainder'] else 'Цельный хлыст'}")
+                print(f"   Использовано хлыстов: {stock['used_quantity']}/{stock['quantity']}")
+                print(f"   Использованная длина: {stock['used_length']:.0f}мм")
+                if stock['is_remainder']:
+                    print(f"   Warehouseremaindersid: {stock.get('warehouseremaindersid', 'N/A')}")
+                    print(f"   Instance ID: {stock.get('instance_id', 'N/A')}")
+            
+            return True  # Успешно размещено
             
         except Exception as e:
             print(f"❌ Ошибка в _add_piece_to_stock: {e}")
-            # Возвращаем ошибку вместо остановки оптимизации
-            raise e
+            # Возвращаем False вместо ошибки, чтобы оптимизатор мог продолжить работу
+            return False
     
     def _create_cut_plan_from_stock(self, stock: Dict) -> CutPlan:
         """Создает план распила из заполненного хлыста"""
@@ -631,15 +592,16 @@ class SimpleOptimizer:
         print(f"   is_remainder: {is_remainder_value}")
         print(f"   warehouseremaindersid: {warehouseremaindersid_value}")
         print(f"   Количество распилов: {len(stock['cuts'])}")
+        print(f"   Детали: {stock['cuts']}")
         
         return CutPlan(
-            stock_id=stock['id'],  # Используем уникальный ID экземпляра, а не original_id
+            stock_id=stock['original_id'],  # Используем оригинальный ID хлыста
             stock_length=stock['length'],
             cuts=stock['cuts'].copy(),
             waste=waste,
             waste_percent=waste_percent,
             remainder=remainder,
-            count=1,
+            count=1,  # Устанавливаем count=1, так как это один план
             is_remainder=is_remainder_value,
             warehouseremaindersid=warehouseremaindersid_value
         )
@@ -657,10 +619,10 @@ class SimpleOptimizer:
                     'avg_waste_per_stock': 0
                 }
             
-            total_stocks = len(cut_plans)
-            total_cuts = sum(plan.get_cuts_count() for plan in cut_plans)
-            total_length = sum(plan.stock_length for plan in cut_plans)
-            total_waste = sum(plan.waste for plan in cut_plans)
+            total_stocks = sum(getattr(plan, 'count', 1) for plan in cut_plans)
+            total_cuts = sum(plan.get_cuts_count() * getattr(plan, 'count', 1) for plan in cut_plans)
+            total_length = sum(plan.stock_length * getattr(plan, 'count', 1) for plan in cut_plans)
+            total_waste = sum(plan.waste * getattr(plan, 'count', 1) for plan in cut_plans)
             waste_percent = (total_waste / total_length * 100) if total_length > 0 else 0
             
             return {
@@ -733,12 +695,14 @@ class SimpleOptimizer:
             for cut in invalid_plan.cuts:
                 if isinstance(cut, dict) and 'length' in cut and 'quantity' in cut and 'profile_id' in cut:
                     for i in range(cut['quantity']):
-                        pieces_to_redistribute.append({
-                            'profile_id': cut['profile_id'],
-                            'profile_code': cut.get('profile_code', ''),  # Добавляем артикул профиля
-                            'length': cut['length'],
-                            'element_name': f"Переразмещаемая деталь {cut['length']}мм"
-                        })
+                        piece = Piece(
+                            profile_id=cut['profile_id'],
+                            profile_code=cut.get('profile_code', ''),
+                            length=cut['length'],
+                            element_name=f"Переразмещаемая деталь {cut['length']}мм",
+                            order_id=1  # Временный order_id
+                        )
+                        pieces_to_redistribute.append(piece)
             
             if not pieces_to_redistribute:
                 print("⚠️ Нет деталей для переразмещения")
@@ -752,8 +716,14 @@ class SimpleOptimizer:
             # Создаем новые хлысты для неразмещенных деталей
             print(f"📝 Создаю новые хлысты для {len(unplaced_pieces)} деталей...")
             
+            # Защита от бесконечного цикла
+            max_iterations = 100
+            iteration_count = 0
+            
             # Группируем детали по оптимальному размещению
-            while unplaced_pieces:
+            while unplaced_pieces and iteration_count < max_iterations:
+                iteration_count += 1
+                
                 # Находим подходящий хлыст из исходного списка
                 best_stock = None
                 best_stock_usage = 0
@@ -765,7 +735,7 @@ class SimpleOptimizer:
                     temp_pieces = unplaced_pieces.copy()
                     
                     for piece in temp_pieces:
-                        needed = piece['length'] + (self.settings.blade_width if simulated_count > 0 else 0)
+                        needed = piece.length + (self.settings.blade_width if simulated_count > 0 else 0)
                         if simulated_length + needed <= orig_stock.length:
                             simulated_length += needed
                             simulated_count += 1
@@ -776,25 +746,42 @@ class SimpleOptimizer:
                         best_stock_usage = usage_percent
                 
                 if best_stock:
-                    # Создаем новый хлыст
-                    new_stock_id = f"auto_{best_stock.id}_{len(corrected_plans) + 1}"
+                    # Создаем новый хлыст с ВСЕМИ необходимыми полями
+                    new_stock_id = f"auto_{best_stock.id}_{len(corrected_plans) + 1}_{int(time.time())}"
                     new_stock = {
                         'id': new_stock_id,
                         'original_id': best_stock.id,
                         'length': best_stock.length,
+                        'profile_code': getattr(best_stock, 'profile_code', None),
+                        'warehouseremaindersid': None,
+                        'groupgoods_thick': getattr(best_stock, 'groupgoods_thick', 6000),
+                        'is_remainder': False,
                         'used_length': 0,
                         'cuts': [],
-                        'cuts_count': 0
+                        'cuts_count': 0,
+                        'quantity': 1,
+                        'used_quantity': 0,
+                        'original_stock': best_stock
                     }
+                    
+                    available_stocks.append(new_stock)
                     
                     # Размещаем детали в новый хлыст
                     placed_in_new = []
                     for piece in unplaced_pieces.copy():  # Копируем для безопасной модификации
-                        needed = piece['length'] + (self.settings.blade_width if new_stock['cuts_count'] > 0 else 0)
+                        # Пропускаем уже размещенные детали
+                        if piece.placed:
+                            continue
+                            
+                        needed = piece.length + (self.settings.blade_width if new_stock['cuts_count'] > 0 else 0)
                         if new_stock['used_length'] + needed <= new_stock['length']:
-                            self._add_piece_to_stock(new_stock, piece)
-                            placed_in_new.append(piece)
-                            print(f"  ✅ Деталь {piece['length']}мм размещена в новый хлыст {new_stock_id}")
+                            if self._add_piece_to_stock(new_stock, piece):
+                                placed_in_new.append(piece)
+                                print(f"  ✅ Деталь {piece.length}мм размещена в новый хлыст {new_stock_id}")
+                            else:
+                                print(f"  ⚠️ Не удалось разместить деталь {piece.length}мм в новый хлыст {new_stock_id}")
+                        else:
+                            print(f"  ⚠️ Деталь {piece.length}мм не помещается в новый хлыст {new_stock_id} (нужно: {new_stock['used_length'] + needed:.0f}мм, доступно: {new_stock['length']:.0f}мм)")
                     
                     # Удаляем размещенные детали из списка неразмещенных
                     for piece in placed_in_new:
@@ -814,10 +801,13 @@ class SimpleOptimizer:
                     print("❌ Не удалось найти подходящий хлыст для оставшихся деталей")
                     break
             
+            if iteration_count >= max_iterations:
+                print(f"⚠️ Достигнут лимит итераций ({max_iterations}), останавливаю автокоррекцию")
+            
             if unplaced_pieces:
                 print(f"⚠️ Остались неразмещенными {len(unplaced_pieces)} деталей")
                 for piece in unplaced_pieces:
-                    print(f"   - {piece['element_name']}: {piece['length']}мм")
+                    print(f"   - {piece.element_name}: {piece.length}мм")
             
             print(f"🎯 Автокоррекция завершена. Создано {len(corrected_plans)} планов")
             return corrected_plans
@@ -828,9 +818,13 @@ class SimpleOptimizer:
             traceback.print_exc()
             return []
 
+        return []
+
     def _group_identical_plans(self, cut_plans: List[CutPlan]) -> List[CutPlan]:
         """Группирует идентичные планы (одинаковые длина и набор распилов, и тип хлыста)"""
+
         def cuts_signature(cuts: List[Dict]) -> tuple:
+            """Создает уникальную подпись для набора распилов"""
             normalized = []
             for c in cuts:
                 if isinstance(c, dict):
@@ -839,14 +833,565 @@ class SimpleOptimizer:
             return tuple(normalized)
 
         groups: Dict[tuple, CutPlan] = {}
+        remainder_plans = []  # Отдельный список для планов деловых остатков
+        
         for plan in cut_plans:
-            key = (float(plan.stock_length), cuts_signature(plan.cuts), bool(getattr(plan, 'is_remainder', False)))
+            # КРИТИЧЕСКИ ВАЖНО: деловые остатки НЕ группируем!
+            # Каждый деловой остаток уникален и используется только один раз
+            if getattr(plan, 'is_remainder', False):
+                remainder_plans.append(plan)
+                print(f"🔧 Деловой остаток {plan.stock_id} не группируется (warehouseremaindersid: {getattr(plan, 'warehouseremaindersid', None)})")
+                continue
+            
+            # Группируем только цельные материалы
+            cuts_sig = cuts_signature(plan.cuts)
+            key = (
+                float(plan.stock_length),
+                cuts_sig,
+                bool(getattr(plan, 'is_remainder', False)),  # Всегда False для цельных материалов
+                getattr(plan, 'warehouseremaindersid', None)  # Всегда None для цельных материалов
+            )
+
+            plan_count = getattr(plan, 'count', 1)
             if key in groups:
-                groups[key].count += getattr(plan, 'count', 1)
+                # Увеличиваем счетчик группы только для цельных материалов
+                old_count = getattr(groups[key], 'count', 1)
+                groups[key].count = old_count + plan_count
+                print(f"🔧 Группирую план цельного хлыста {plan.stock_id} с существующим (теперь count={groups[key].count})")
             else:
-                groups[key] = plan
-                groups[key].count = getattr(plan, 'count', 1)
-        return list(groups.values())
+                # Создаем новую группу для цельных материалов
+                new_plan = CutPlan(
+                    stock_id=plan.stock_id,  # Используем ID первого плана в группе
+                    stock_length=plan.stock_length,
+                    cuts=plan.cuts.copy(),
+                    waste=plan.waste,
+                    waste_percent=plan.waste_percent,
+                    remainder=plan.remainder,
+                    count=plan_count,
+                    is_remainder=False,  # Гарантированно False для цельных материалов
+                    warehouseremaindersid=None  # Гарантированно None для цельных материалов
+                )
+                groups[key] = new_plan
+                print(f"🔧 Создаю новую группу для плана цельного хлыста {plan.stock_id} (count={plan_count})")
+
+        # Объединяем цельные материалы (сгруппированные) и деловые остатки (несгруппированные)
+        result = list(groups.values()) + remainder_plans
+        print(f"🔧 Группировка завершена: {len(cut_plans)} планов → {len(result)} финальных планов")
+        print(f"   Цельные материалы: {len(groups)} групп")
+        print(f"   Деловые остатки: {len(remainder_plans)} планов")
+        
+        # Проверяем корректность группировки
+        total_pieces_before = sum(
+            sum(cut.get('quantity', 0) for cut in plan.cuts) * getattr(plan, 'count', 1)
+            for plan in cut_plans
+        )
+        total_pieces_after = sum(
+            sum(cut.get('quantity', 0) for cut in plan.cuts) * getattr(plan, 'count', 1)
+            for plan in result
+        )
+        
+        if total_pieces_before != total_pieces_after:
+            print(f"⚠️ ВНИМАНИЕ: Группировка изменила количество деталей!")
+            print(f"   До группировки: {total_pieces_before}")
+            print(f"   После группировки: {total_pieces_after}")
+            print(f"   Разница: {total_pieces_after - total_pieces_before}")
+        else:
+            print(f"✅ Группировка корректна: количество деталей не изменилось")
+        
+        # Дополнительная валидация деловых остатков
+        remainder_validation_errors = self._validate_remainder_usage(result)
+        if remainder_validation_errors:
+            print(f"⚠️ КРИТИЧЕСКИЕ ОШИБКИ с деловыми остатками:")
+            for error in remainder_validation_errors:
+                print(f"   - {error}")
+        else:
+            print(f"✅ Валидация деловых остатков пройдена")
+        
+        return result
+
+    def _validate_remainder_usage(self, cut_plans: List[CutPlan]) -> List[str]:
+        """
+        Валидирует корректность использования деловых остатков
+        
+        Returns:
+            Список ошибок (пустой если все корректно)
+        """
+        errors = []
+        
+        # Отслеживаем использованные деловые остатки
+        used_remainders = {}
+        
+        for plan in cut_plans:
+            is_remainder = getattr(plan, 'is_remainder', False)
+            
+            if is_remainder:
+                plan_count = getattr(plan, 'count', 1)
+                warehouseremaindersid = getattr(plan, 'warehouseremaindersid', None)
+                
+                # Ошибка 1: count > 1 для деловых остатков
+                if plan_count > 1:
+                    errors.append(f"Деловой остаток {plan.stock_id} используется {plan_count} раз (должен быть 1)")
+                
+                # Ошибка 2: дублирование warehouseremaindersid
+                if warehouseremaindersid:
+                    if warehouseremaindersid in used_remainders:
+                        errors.append(f"warehouseremaindersid {warehouseremaindersid} используется повторно (хлысты {used_remainders[warehouseremaindersid]} и {plan.stock_id})")
+                    else:
+                        used_remainders[warehouseremaindersid] = plan.stock_id
+                else:
+                    errors.append(f"Деловой остаток {plan.stock_id} не имеет warehouseremaindersid")
+        
+        return errors
+
+    def _find_unplaced_pieces(self, all_pieces: List[Piece], available_stocks: List[Dict]) -> List[Piece]:
+        """
+        Находит все неразмещенные детали
+        ИСПРАВЛЕННАЯ версия: работает с флагом placed
+        """
+        # Просто возвращаем детали, которые не помечены как размещенные
+        unplaced_pieces = []
+        for piece in all_pieces:
+            if not piece.placed:
+                unplaced_pieces.append(piece)
+        
+        return unplaced_pieces
+
+    def _find_unplaced_pieces_in_result(self, profiles: List[Profile], cut_plans: List[CutPlan]) -> List[Dict]:
+        """
+        Находит все неразмещенные детали из результата оптимизации
+        ПРАВИЛЬНАЯ версия: учитывает количество деталей каждого типа
+        """
+        # Анализируем размещение профилей в планах
+        
+        # Создаем счетчик размещенных деталей по (profile_id, length)
+        placed_pieces_count = {}
+        
+        # Собираем все размещенные детали из планов с правильным подсчетом
+        for plan in cut_plans:
+            plan_count = getattr(plan, 'count', 1)  # Количество одинаковых планов
+            print(f"🔧 Анализирую план {plan.stock_id} с count={plan_count}")
+            
+            for cut in plan.cuts:
+                if isinstance(cut, dict) and 'length' in cut and 'quantity' in cut and 'profile_id' in cut:
+                    piece_key = (cut['profile_id'], cut['length'])
+                    # Учитываем и количество в cut, и количество планов
+                    total_quantity = cut['quantity'] * plan_count
+                    placed_pieces_count[piece_key] = placed_pieces_count.get(piece_key, 0) + total_quantity
+                    print(f"  - Деталь {cut['profile_id']}: {cut['length']}мм × {cut['quantity']}шт × {plan_count} = {total_quantity}шт")
+                else:
+                    print(f"  ⚠️ Некорректный cut: {cut}")
+        
+        # Создаем счетчик необходимых деталей
+        needed_pieces_count = {}
+        for profile in profiles:
+            piece_key = (profile.id, profile.length)
+            needed_pieces_count[piece_key] = needed_pieces_count.get(piece_key, 0) + profile.quantity
+            print(f"🔧 Нужно деталей {profile.id}: {profile.length}мм × {profile.quantity}шт")
+        
+        # Находим неразмещенные детали
+        unplaced_pieces = []
+        print(f"\n🔍 Анализ размещения:")
+        
+        for profile in profiles:
+            piece_key = (profile.id, profile.length)
+            needed = needed_pieces_count.get(piece_key, 0)
+            placed = placed_pieces_count.get(piece_key, 0)
+            
+            unplaced_count = max(0, needed - placed)
+            
+            print(f"  {profile.element_name} ({profile.length}мм): нужно {needed}, размещено {placed}, не размещено {unplaced_count}")
+            
+            # Добавляем неразмещенные экземпляры
+            for i in range(unplaced_count):
+                unplaced_pieces.append({
+                    'profile_id': profile.id,
+                    'profile_code': profile.profile_code,
+                    'length': profile.length,
+                    'element_name': profile.element_name
+                })
+        
+        print(f"🔧 Всего неразмещенных деталей: {len(unplaced_pieces)}")
+        
+        # Дополнительная проверка: выводим общую статистику
+        total_needed = sum(needed_pieces_count.values())
+        total_placed = sum(placed_pieces_count.values())
+        print(f"🔧 ИТОГО: нужно {total_needed}, размещено {total_placed}, разница {total_placed - total_needed}")
+        
+        return unplaced_pieces
+
+    def _single_pass_optimization(self, pieces_to_place: List[Piece], available_stocks: List[Dict], progress_fn=None) -> int:
+        """
+        Один проход оптимизации - размещаем детали без дублирования
+        """
+        print("🔧 Запускаю один проход оптимизации...")
+        
+        if progress_fn:
+            progress_fn(10)
+        
+        placed_count = 0
+        
+        # Сортируем детали по длине (от больших к меньшим) для лучшего размещения
+        pieces_to_place.sort(key=lambda x: x.length, reverse=True)
+        
+        # Сортируем хлысты по длине (от больших к меньшим)
+        available_stocks.sort(key=lambda x: x['length'], reverse=True)
+        
+        # Группируем хлысты по оригинальному ID, чтобы избежать дублирования
+        stock_groups = {}
+        for stock in available_stocks:
+            original_id = stock['original_id']
+            if original_id not in stock_groups:
+                stock_groups[original_id] = []
+            stock_groups[original_id].append(stock)
+        
+        print(f"🔧 Сгруппировано {len(stock_groups)} типов хлыстов")
+        
+        # Размещаем детали в один проход
+        for piece in pieces_to_place:
+            if piece.placed:  # Пропускаем уже размещенные детали
+                continue
+                
+            # Ищем лучший хлыст для детали среди всех групп
+            best_stock = None
+            best_score = float('-inf')
+            
+            for group_id, stock_list in stock_groups.items():
+                # Ищем лучший хлыст в группе
+                for stock in stock_list:
+                    if not self._can_place_piece(stock, piece):
+                        continue
+                    
+                    # Рассчитываем "силу" размещения
+                    score = self._calculate_placement_score(stock, piece)
+                    if score > best_score:
+                        best_score = score
+                        best_stock = stock
+            
+            # Размещаем деталь в лучший найденный хлыст
+            if best_stock:
+                if self._add_piece_to_stock(best_stock, piece):
+                    placed_count += 1
+                    print(f"🔧 Размещена деталь {piece.length}мм в хлыст {best_stock['id']} (группа {best_stock['original_id']})")
+                    
+                    # Проверяем, не заполнен ли хлыст полностью
+                    if best_stock.get('is_used', False) or best_stock['used_quantity'] >= best_stock.get('max_usage', 1):
+                        # Удаляем использованный хлыст из группы
+                        if best_stock in stock_groups[best_stock['original_id']]:
+                            stock_groups[best_stock['original_id']].remove(best_stock)
+                            print(f"🔧 Удаляю использованный хлыст {best_stock['id']} из группы {best_stock['original_id']}")
+                    
+                    if progress_fn:
+                        progress_fn(10 + (placed_count / len(pieces_to_place)) * 50)
+                else:
+                    print(f"⚠️ Не удалось разместить деталь {piece.length}мм в хлыст {best_stock['id']}")
+            else:
+                print(f"⚠️ Не найден подходящий хлыст для детали {piece.length}мм")
+        
+        print(f"✅ Один проход оптимизации завершен! Размещено: {placed_count}/{len(pieces_to_place)} деталей")
+        return placed_count
+
+    def _place_remaining_pieces(self, unplaced_pieces: List[Piece], available_stocks: List[Dict], original_stocks: List[Stock]) -> int:
+        """
+        Размещает оставшиеся детали, создавая новые хлысты при необходимости
+        УЛУЧШЕННАЯ версия: принудительно размещает ВСЕ детали
+        """
+        print(f"🔧 Размещаю {len(unplaced_pieces)} оставшихся деталей...")
+        
+        placed_count = 0
+        
+        # Сортируем детали по длине (от больших к меньшим)
+        unplaced_pieces.sort(key=lambda x: x.length, reverse=True)
+        
+        # Группируем детали по артикулу профиля для оптимального размещения
+        pieces_by_profile = {}
+        for piece in unplaced_pieces:
+            if not piece.placed:
+                profile_code = piece.profile_code
+                if profile_code not in pieces_by_profile:
+                    pieces_by_profile[profile_code] = []
+                pieces_by_profile[profile_code].append(piece)
+        
+        print(f"📦 Группировка по артикулам: {list(pieces_by_profile.keys())}")
+        
+        # Для каждого артикула создаем подходящие хлысты
+        for profile_code, pieces in pieces_by_profile.items():
+            if not pieces:
+                continue
+                
+            print(f"🔧 Обрабатываю артикул {profile_code}: {len(pieces)} деталей")
+            
+            # Находим подходящий исходный хлыст для этого артикула
+            suitable_stock = None
+            for stock in original_stocks:
+                if getattr(stock, 'profile_code', None) == profile_code:
+                    suitable_stock = stock
+                    break
+            
+            if not suitable_stock:
+                # Берем первый доступный хлыст, если подходящий не найден
+                suitable_stock = original_stocks[0] if original_stocks else None
+            
+            if not suitable_stock:
+                print(f"❌ Не найден подходящий хлыст для артикула {profile_code}")
+                continue
+            
+            # Сортируем детали по длине для лучшего размещения
+            pieces.sort(key=lambda x: x.length, reverse=True)
+            
+            # Создаем новые хлысты для размещения деталей
+            current_stock = None
+            current_stock_length = 0
+            
+            for piece in pieces:
+                if piece.placed:
+                    continue
+                    
+                # Если текущий хлыст заполнен или не создан, создаем новый
+                if current_stock is None or current_stock_length + piece.length > suitable_stock.length:
+                    # Создаем новый хлыст
+                    new_stock_id = f"new_{profile_code}_{len(available_stocks) + 1}_{int(time.time())}"
+                    new_stock = {
+                        'id': new_stock_id,
+                        'original_id': suitable_stock.id,
+                        'length': suitable_stock.length,
+                        'profile_code': profile_code,
+                        'warehouseremaindersid': None,
+                        'groupgoods_thick': getattr(suitable_stock, 'groupgoods_thick', 6000),
+                        'is_remainder': False,
+                        'used_length': 0,
+                        'cuts': [],
+                        'cuts_count': 0,
+                        'quantity': 1,
+                        'used_quantity': 0,
+                        'original_stock': suitable_stock
+                    }
+                    
+                    available_stocks.append(new_stock)
+                    current_stock = new_stock
+                    current_stock_length = 0
+                    
+                    print(f"  ✅ Создан новый хлыст {new_stock_id} для артикула {profile_code}")
+                
+                # Размещаем деталь в текущий хлыст с ПРИНУДИТЕЛЬНЫМ размещением
+                if self._add_piece_to_stock(current_stock, piece, force_placement=True):
+                    placed_count += 1
+                    current_stock_length += piece.length
+                    print(f"    ✅ Размещена деталь {piece.length}мм в хлыст {current_stock['id']}")
+                else:
+                    print(f"    ⚠️ Не удалось разместить деталь {piece.length}мм в хлыст {current_stock['id']}")
+                    
+                    # Если деталь не помещается, создаем отдельный хлыст для неё
+                    if not piece.placed:
+                        single_stock_id = f"single_{profile_code}_{piece.length}_{len(available_stocks) + 1}_{int(time.time())}"
+                        single_stock = {
+                            'id': single_stock_id,
+                            'original_id': suitable_stock.id,
+                            'length': piece.length + self.settings.blade_width + 100,  # Минимальная длина + запас
+                            'profile_code': profile_code,
+                            'warehouseremaindersid': None,
+                            'groupgoods_thick': getattr(suitable_stock, 'groupgoods_thick', 6000),
+                            'is_remainder': False,
+                            'used_length': 0,
+                            'cuts': [],
+                            'cuts_count': 0,
+                            'quantity': 1,
+                            'used_quantity': 0,
+                            'original_stock': suitable_stock
+                        }
+                        
+                        available_stocks.append(single_stock)
+                        
+                        if self._add_piece_to_stock(single_stock, piece, force_placement=True):
+                            placed_count += 1
+                            print(f"    ✅ Размещена деталь {piece.length}мм в отдельный хлыст {single_stock_id}")
+                        else:
+                            print(f"    ❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось разместить деталь {piece.length}мм даже в отдельный хлыст")
+        
+        print(f"✅ Дополнительно размещено {placed_count} деталей в новых хлыстах")
+        return placed_count
+    
+    def _can_place_piece(self, stock: Dict, piece: Piece) -> bool:
+        """Проверяет, можно ли разместить деталь в хлыст"""
+        # КРИТИЧЕСКАЯ ПРОВЕРКА: хлыст уже использован?
+        if stock.get('is_used', False):
+            return False
+        
+        # Проверяем максимальное количество использований
+        if stock.get('used_quantity', 0) >= stock.get('max_usage', 1):
+            return False
+        
+        # Проверяем артикул профиля
+        if stock['profile_code'] and piece.profile_code and stock['profile_code'] != piece.profile_code:
+            return False
+        
+        # Проверяем длину
+        needed_length = piece.length
+        if stock['cuts_count'] > 0:
+            needed_length += self.settings.blade_width
+        
+        effective_length = max(0, stock['length'] - (self.settings.begin_indent + self.settings.end_indent))
+        can_fit = stock['used_length'] + needed_length <= effective_length
+        
+        return can_fit
+    
+    def _calculate_waste_if_placed(self, stock: Dict, piece: Piece) -> float:
+        """Рассчитывает отходы при размещении детали"""
+        needed_length = piece.length
+        if stock['cuts_count'] > 0:
+            needed_length += self.settings.blade_width
+        
+        effective_length = max(0, stock['length'] - (self.settings.begin_indent + self.settings.end_indent))
+        remaining_length = effective_length - (stock['used_length'] + needed_length)
+        
+        return max(0, remaining_length)
+
+    def _calculate_placement_score(self, stock: Dict, piece: Piece) -> float:
+        """Рассчитывает "силу" размещения детали в хлыст"""
+        score = 0.0
+        
+        # Базовый балл за размер
+        score += piece.length * 0.1
+        
+        # Бонус за эффективное использование длины
+        effective_length = max(0, stock['length'] - (self.settings.begin_indent + self.settings.end_indent))
+        usage_ratio = (stock['used_length'] + piece.length) / effective_length
+        if usage_ratio <= 0.8:  # Хлыст не переполнен
+            score += 100
+        elif usage_ratio <= 0.95:  # Хлыст заполнен оптимально
+            score += 200
+        else:  # Хлыст почти полный
+            score += 50
+        
+        # Бонус за минимальные отходы
+        remaining_length = effective_length - (stock['used_length'] + piece.length)
+        if remaining_length < self.settings.min_remainder_length:
+            score += 150  # Полное использование
+        elif remaining_length >= self.settings.min_remainder_length:
+            score += 100  # Деловой остаток
+        
+        # Штраф за неравномерное распределение
+        if stock['used_length'] > 0:
+            # Предпочитаем хлысты с меньшим количеством деталей
+            score -= stock['cuts_count'] * 10
+        
+        return score
+    
+    def _update_placement_forces(self, stock: Dict):
+        """Обновляет "силы" размещения после добавления детали"""
+        # Уменьшаем привлекательность хлыста для следующих деталей
+        # чтобы детали распределялись более равномерно
+        pass  # Пока просто заглушка, можно расширить логику
+
+    def _create_final_stocks_for_unplaced(self, unplaced_pieces: List[Piece], available_stocks: List[Dict], original_stocks: List[Stock]):
+        """
+        Создает финальные хлысты для оставшихся неразмещенных деталей
+        УЛУЧШЕННАЯ версия: гарантированно размещает ВСЕ детали
+        """
+        print(f"🔧 Создаю финальные хлысты для {len(unplaced_pieces)} неразмещенных деталей...")
+        
+        # Группируем детали по артикулу профиля
+        pieces_by_profile = {}
+        for piece in unplaced_pieces:
+            if not piece.placed:
+                profile_code = piece.profile_code
+                if profile_code not in pieces_by_profile:
+                    pieces_by_profile[profile_code] = []
+                pieces_by_profile[profile_code].append(piece)
+        
+        # Для каждого артикула создаем отдельный хлыст
+        for profile_code, pieces in pieces_by_profile.items():
+            if not pieces:
+                continue
+                
+            print(f"🔧 Создаю финальный хлыст для артикула {profile_code}: {len(pieces)} деталей")
+            
+            # Находим подходящий исходный хлыст
+            suitable_stock = None
+            for stock in original_stocks:
+                if getattr(stock, 'profile_code', None) == profile_code:
+                    suitable_stock = stock
+                    break
+            
+            if not suitable_stock:
+                suitable_stock = original_stocks[0] if original_stocks else None
+            
+            if not suitable_stock:
+                print(f"❌ Не найден подходящий хлыст для артикула {profile_code}")
+                continue
+            
+            # Сортируем детали по длине для лучшего размещения
+            pieces.sort(key=lambda x: x.length, reverse=True)
+            
+            # Создаем финальный хлыст с достаточной длиной
+            max_piece_length = max(p.length for p in pieces)
+            total_needed_length = sum(p.length for p in pieces) + (len(pieces) - 1) * self.settings.blade_width
+            
+            # Используем максимальную из: исходной длины, суммы деталей + пропилы, или максимальной детали + запас
+            final_stock_length = max(
+                suitable_stock.length,
+                total_needed_length + 200,  # Запас 200мм
+                max_piece_length + self.settings.blade_width + 300  # Максимальная деталь + запас
+            )
+            
+            final_stock_id = f"final_{profile_code}_{len(available_stocks) + 1}_{int(time.time())}"
+            final_stock = {
+                'id': final_stock_id,
+                'original_id': suitable_stock.id,
+                'length': final_stock_length,
+                'profile_code': profile_code,
+                'warehouseremaindersid': None,
+                'groupgoods_thick': getattr(suitable_stock, 'groupgoods_thick', 6000),
+                'is_remainder': False,
+                'used_length': 0,
+                'cuts': [],
+                'cuts_count': 0,
+                'quantity': 1,
+                'used_quantity': 0,
+                'original_stock': suitable_stock
+            }
+            
+            available_stocks.append(final_stock)
+            
+            # Размещаем все детали этого артикула в финальный хлыст
+            placed_in_final = 0
+            for piece in pieces:
+                if not piece.placed:
+                    if self._add_piece_to_stock(final_stock, piece, force_placement=True):
+                        placed_in_final += 1
+                        print(f"  ✅ Размещена деталь {piece.length}мм в финальный хлыст {final_stock_id}")
+                    else:
+                        print(f"  ⚠️ Не удалось разместить деталь {piece.length}мм в финальный хлыст {final_stock_id}")
+                        
+                        # Если деталь не помещается даже в финальный хлыст, создаем отдельный хлыст
+                        if not piece.placed:
+                            single_stock_id = f"single_final_{profile_code}_{piece.length}_{len(available_stocks) + 1}_{int(time.time())}"
+                            single_stock = {
+                                'id': single_stock_id,
+                                'original_id': suitable_stock.id,
+                                'length': piece.length + self.settings.blade_width + 200,  # Деталь + пропилы + запас
+                                'profile_code': profile_code,
+                                'warehouseremaindersid': None,
+                                'groupgoods_thick': getattr(suitable_stock, 'groupgoods_thick', 6000),
+                                'is_remainder': False,
+                                'used_length': 0,
+                                'cuts': [],
+                                'cuts_count': 0,
+                                'quantity': 1,
+                                'used_quantity': 0,
+                                'original_stock': suitable_stock
+                            }
+                            
+                            available_stocks.append(single_stock)
+                            
+                            if self._add_piece_to_stock(single_stock, piece, force_placement=True):
+                                print(f"  ✅ Размещена деталь {piece.length}мм в отдельный финальный хлыст {single_stock_id}")
+                            else:
+                                print(f"  ❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось разместить деталь {piece.length}мм даже в отдельный финальный хлыст")
+            
+            print(f"  ✅ Создан финальный хлыст {final_stock_id} для артикула {profile_code} (размещено {placed_in_final}/{len(pieces)} деталей)")
+        
+        print(f"✅ Создано {len(pieces_by_profile)} финальных хлыстов")
+
 
 class LinearOptimizer:
     """

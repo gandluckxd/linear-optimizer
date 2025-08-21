@@ -378,6 +378,52 @@ SPECIAL_BUTTON_STYLES = {
             background-color: #666666;
             color: #cccccc;
         }
+    """,
+    
+    "copy": """
+        QPushButton {
+            background-color: #4CAF50;
+            color: white;
+            font-weight: bold;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            font-size: 10pt;
+            min-width: 120px;
+        }
+        QPushButton:hover {
+            background-color: #45a049;
+        }
+        QPushButton:pressed {
+            background-color: #3d8b40;
+        }
+        QPushButton:disabled {
+            background-color: #666666;
+            color: #cccccc;
+        }
+    """,
+    
+    "copy_csv": """
+        QPushButton {
+            background-color: #2196F3;
+            color: white;
+            font-weight: bold;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            font-size: 10pt;
+            min-width: 120px;
+        }
+        QPushButton:hover {
+            background-color: #1976D2;
+        }
+        QPushButton:pressed {
+            background-color: #1565C0;
+        }
+        QPushButton:disabled {
+            background-color: #666666;
+            color: #cccccc;
+        }
     """
 }
 
