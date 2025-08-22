@@ -281,13 +281,12 @@ class APIClient:
             if not result or not getattr(result, 'cut_plans', None):
                 raise Exception("Нет данных оптимизации для выгрузки")
 
-            # Маппинги для удобства
-            goodsid_to_orderid: Dict[int, int] = {}
-            for p in profiles:
-                # В наших профилях id = goodsid, order_id = grorderid
-                goodsid_to_orderid[int(p.id)] = int(p.order_id)
-            
-            print(f"🔧 API Client: Создан маппинг goodsid->orderid для {len(goodsid_to_orderid)} профилей")
+            # Теперь order_id будет содержаться прямо в cuts, поэтому маппинг не нужен
+            # Оставляем только для отладочной информации
+            profile_orderids = set(p.order_id for p in profiles)
+            print(f"🔧 API Client: Профили содержат {len(profiles)} записей из {len(profile_orderids)} заказов")
+            print(f"🔧 API Client: Список orderid в профилях: {sorted(profile_orderids)}")
+            print(f"🔧 API Client: Теперь order_id будет браться прямо из результатов оптимизации")
 
             # Очистка предыдущих данных для текущего сменного задания
             print(f"🔧 API Client: Очистка предыдущих данных для grorders_mos_id={grorders_mos_id}")
@@ -381,14 +380,22 @@ class APIClient:
                         length_val = float(c.get('length', 0) or 0)
                         qty_val = int(c.get('quantity', 0) or 0)
                         pid = int(c.get('profile_id', 0) or 0)
-                        order_id_for_piece = goodsid_to_orderid.get(pid) if pid in goodsid_to_orderid else None
+                        
+                        # Теперь order_id берется прямо из результатов оптимизации
+                        final_orderid = int(c.get('order_id', 0) or 0)
 
                         if qty_val <= 0 or length_val <= 0:
                             continue
 
+                        # Отладочная информация
+                        if final_orderid == 0:
+                            print(f"⚠️ API Client: Для детали goodsid={pid} не найден order_id в результатах оптимизации!")
+                        
+                        print(f"🔧 API Client: Деталь {subnum_counter}: goodsid={pid}, orderid={final_orderid}, длина={length_val}, кол-во={qty_val}")
+
                         detail_payload = {
                             "optimized_mos_id": optimized_mos_id,
-                            "orderid": int(order_id_for_piece or 0),
+                            "orderid": final_orderid,
                             "qty": int(qty_val),
                             "itemsdetailid": None,
                             "itemlong": float(length_val),

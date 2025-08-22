@@ -49,7 +49,8 @@ def get_profiles_for_order(order_id: int) -> List[Profile]:
             g.marking as g_marking,
             g.goodsid,
             grd.qty * itd.qty as total_qty,
-            itd.thick
+            itd.thick,
+            o.orderid
         FROM grorders gr
         JOIN grordersdetail grd on grd.grorderid = gr.grorderid
         JOIN orderitems oi on oi.orderitemsid = grd.orderitemsid
@@ -70,7 +71,7 @@ def get_profiles_for_order(order_id: int) -> List[Profile]:
         for row in rows:
             profile = Profile(
                 id=row[7],  # goodsid
-                order_id=order_id,
+                order_id=row[10],  # o.orderid - реальный ID заказа
                 element_name=row[4] or "",  # oi_name - Элемент (наименование orderitem)
                 profile_code=row[6],  # g_marking - Артикул профиля
                 length=float(row[9]),  # thick (длина)

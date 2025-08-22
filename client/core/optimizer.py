@@ -527,10 +527,12 @@ class SimpleOptimizer:
                     print(f"❌ Деталь {piece.length}мм не помещается в хлыст {stock['id']} (нужно: {stock['used_length'] + needed_length:.0f}мм, доступно: {effective_length:.0f}мм)")
                     return False
             
-            # Ищем существующий распил такого же типа
+            # Ищем существующий распил такого же типа (включая order_id для точной группировки)
             existing_cut = None
             for cut in stock['cuts']:
-                if cut['profile_id'] == piece.profile_id and cut['length'] == piece.length:
+                if (cut['profile_id'] == piece.profile_id and 
+                    cut['length'] == piece.length and 
+                    cut.get('order_id') == piece.order_id):
                     existing_cut = cut
                     break
             
@@ -543,7 +545,8 @@ class SimpleOptimizer:
                     'profile_id': piece.profile_id,
                     'profile_code': piece.profile_code,  # Добавляем артикул профиля
                     'length': piece.length,
-                    'quantity': 1
+                    'quantity': 1,
+                    'order_id': piece.order_id  # Добавляем order_id для точного маппинга
                 })
             
             # Обновляем использованную длину и счетчик
