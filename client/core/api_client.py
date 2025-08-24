@@ -3,10 +3,8 @@ API клиент для взаимодействия с Linear Optimizer API
 """
 
 import requests
-from typing import List, Dict, Optional
-from core.models import Profile, Stock, OptimizationResult, CutPlan, StockRemainder, StockMaterial
-import json
-from datetime import datetime
+from typing import List, Dict
+from core.models import Profile, Stock, OptimizationResult, StockRemainder, StockMaterial
 
 class APIClient:
     """Клиент для работы с API"""
@@ -275,8 +273,9 @@ class APIClient:
             isbar: Признак ISBAR
         """
         try:
-            print(f"🔧 API Client: Начало загрузки данных оптимизации для grorders_mos_id={grorders_mos_id}")
+            print(f"🔧 API Client: *** ИСПРАВЛЕННАЯ ВЕРСИЯ *** Начало загрузки данных оптимизации для grorders_mos_id={grorders_mos_id}")
             print(f"🔧 API Client: Количество планов распила: {len(result.cut_plans) if result.cut_plans else 0}")
+            print(f"🔧 API Client: *** ВЕРСИЯ С ИСПРАВЛЕНИЕМ ORDERID ***")
             
             if not result or not getattr(result, 'cut_plans', None):
                 raise Exception("Нет данных оптимизации для выгрузки")
@@ -381,7 +380,11 @@ class APIClient:
                         qty_val = int(c.get('quantity', 0) or 0)
                         pid = int(c.get('profile_id', 0) or 0)
                         
-                        # Теперь order_id берется прямо из результатов оптимизации
+                        # Подробная отладка содержимого cut
+                        print(f"🔍 API Client: Содержимое cut: {c}")
+                        
+                        # *** ИСПРАВЛЕНО *** order_id берется прямо из результатов оптимизации
+                        # Это корректный ORDERID из таблицы ORDERS, который передается в OPTDETAIL_MOS
                         final_orderid = int(c.get('order_id', 0) or 0)
 
                         if qty_val <= 0 or length_val <= 0:
@@ -434,6 +437,40 @@ class APIClient:
         except Exception as e:
             print(f"❌ API Client: Ошибка загрузки данных MOS: {str(e)}")
             raise Exception(f"Ошибка загрузки данных MOS: {str(e)}")
+
+    def distribute_cell_numbers(self, grorders_mos_id: int) -> dict:
+        """
+        Распределить номера ячеек для оптимизации москитных сеток.
+        Выполняется ПОСЛЕ загрузки данных оптимизации в altawin.
+        
+        Args:
+            grorders_mos_id: ID сменного задания москитных сеток
+            
+        Returns:
+            dict: Результат операции с информацией о количестве обработанных проемов
+        """
+        try:
+            print(f"🔧 API Client: distribute_cell_numbers вызван для grorders_mos_id={grorders_mos_id}")
+            
+            payload = {
+                "grorder_mos_id": grorders_mos_id
+            }
+            
+            response = self.session.post(f"{self.base_url}/api/distribute-cell-numbers", json=payload)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            if result.get("success"):
+                print(f"✅ API Client: Распределение ячеек выполнено успешно: обработано {result.get('processed_items', 0)} проемов")
+            else:
+                print(f"❌ API Client: Ошибка распределения ячеек: {result.get('error', result.get('message'))}")
+            
+            return result
+            
+        except Exception as e:
+            print(f"❌ API Client: Ошибка распределения ячеек: {str(e)}")
+            raise Exception(f"Ошибка распределения ячеек: {str(e)}")
 
     def adjust_materials_altawin(self, grorders_mos_id: int, used_materials: list = None, business_remainders: list = None) -> dict:
         """

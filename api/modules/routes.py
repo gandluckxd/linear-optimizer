@@ -25,8 +25,9 @@ from utils.db_functions import (
     insert_optdetail_mos,
     enrich_optdetail_mos_fields,
     get_grorder_ids_by_grorders_mos_id,
-    delete_grorders_mos
-    ,delete_optimized_mos_by_grorders_mos_id
+    delete_grorders_mos,
+    delete_optimized_mos_by_grorders_mos_id,
+    distribute_cell_numbers
 )
 
 router = APIRouter()
@@ -308,7 +309,8 @@ async def create_optdetail_mos(request: OptDetailMosCreate):
     Создать запись в таблице OPTDETAIL_MOS
     """
     try:
-        print(f"🔧 API: Создание записи в OPTDETAIL_MOS: optimized_mos_id={request.optimized_mos_id}, orderid={request.orderid}")
+        print(f"🔧 API: *** ОТЛАДКА *** Создание записи в OPTDETAIL_MOS: optimized_mos_id={request.optimized_mos_id}, orderid={request.orderid}")
+        print(f"🔧 API: *** ОТЛАДКА *** Полный request: {request}")
         
         # Обогащаем поля перед вставкой, чтобы в insert_optdetail_mos попадали корректные значения
         enriched = enrich_optdetail_mos_fields(
@@ -331,9 +333,14 @@ async def create_optdetail_mos(request: OptDetailMosCreate):
             flugelopentag=request.flugelopentag,
         )
 
+        # *** ИСПРАВЛЕНО *** Используем корректный orderid из функции обогащения
+        final_orderid = enriched.get("orderid", request.orderid)
+        
+        print(f"🔧 API: *** ИСПРАВЛЕНО *** Используем orderid={final_orderid} (исходный={request.orderid})")
+        
         created = insert_optdetail_mos(
             optimized_mos_id=request.optimized_mos_id,
-            orderid=request.orderid,
+            orderid=final_orderid,  # *** ИСПРАВЛЕНО *** Используем корректный orderid
             qty=request.qty,
             itemsdetailid=enriched.get("itemsdetailid"),
             itemlong=request.itemlong,
@@ -421,6 +428,32 @@ async def adjust_materials_altawin(request: dict):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка корректировки материалов: {str(e)}")
+
+@router.post("/distribute-cell-numbers")
+async def distribute_cell_numbers_endpoint(request: dict):
+    """
+    Распределить номера ячеек для оптимизации москитных сеток.
+    Выполняется ПОСЛЕ загрузки данных оптимизации в altawin.
+    """
+    try:
+        grorder_mos_id = request.get('grorder_mos_id')
+        if not grorder_mos_id:
+            raise HTTPException(status_code=400, detail="grorder_mos_id обязателен")
+        
+        print(f"🔧 API: distribute_cell_numbers вызван для grorder_mos_id={grorder_mos_id}")
+        
+        result = distribute_cell_numbers(grorder_mos_id)
+        
+        if result["success"]:
+            print(f"✅ API: Распределение ячеек выполнено успешно: обработано {result['processed_items']} проемов")
+        else:
+            print(f"❌ API: Ошибка распределения ячеек: {result.get('error', result.get('message'))}")
+        
+        return result
+        
+    except Exception as e:
+        print(f"❌ API: Ошибка распределения ячеек: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка распределения ячеек: {str(e)}")
 
 @router.get("/test-connection")
 async def test_connection():

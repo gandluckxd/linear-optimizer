@@ -680,6 +680,14 @@ class LinearOptimizerWindow(QMainWindow):
         self.upload_mos_to_altawin_button.clicked.connect(self.on_upload_mos_clicked)
         self.upload_mos_to_altawin_button.setEnabled(False)
         upload_layout.addWidget(self.upload_mos_to_altawin_button)
+        
+        # Кнопка распределения ячеек
+        self.distribute_cells_button = QPushButton("🏠 Распределить ячейки")
+        self.distribute_cells_button.setStyleSheet(SPECIAL_BUTTON_STYLES["distribute"])
+        self.distribute_cells_button.clicked.connect(self.on_distribute_cells_clicked)
+        self.distribute_cells_button.setEnabled(False)
+        upload_layout.addWidget(self.distribute_cells_button)
+        
         upload_layout.addStretch()
         
         layout.addLayout(upload_layout)
@@ -958,6 +966,7 @@ class LinearOptimizerWindow(QMainWindow):
             
             # Активируем кнопку загрузки в Altawin (MOS)
             self.upload_mos_to_altawin_button.setEnabled(True)
+            self.distribute_cells_button.setEnabled(True)
             
             # Переключаемся на вкладку результатов
             self.tabs.setCurrentIndex(1)
@@ -1090,6 +1099,7 @@ class LinearOptimizerWindow(QMainWindow):
         clear_table(self.results_table)
         self.optimization_result = None
         self.upload_mos_to_altawin_button.setEnabled(False)
+        self.distribute_cells_button.setEnabled(False)
         self.optimize_button.setEnabled(False)
         self.order_info_label.setText("<заказ не загружен>")
         self.status_bar.showMessage("Готов к работе")
@@ -1139,6 +1149,7 @@ class LinearOptimizerWindow(QMainWindow):
         try:
             self.status_bar.showMessage("Загрузка результатов оптимизации в таблицы MOS...")
             self.upload_mos_to_altawin_button.setEnabled(False)
+            self.distribute_cells_button.setEnabled(False)
 
             # ШАГ 1: Сначала загружаем результаты оптимизации в таблицы OPTIMIZED_MOS и OPTDETAIL_MOS
             self.status_bar.showMessage("Загрузка результатов оптимизации в таблицы MOS...")
@@ -1166,7 +1177,7 @@ class LinearOptimizerWindow(QMainWindow):
 
             self.status_bar.showMessage("Результаты оптимизации успешно загружены. Корректировка материалов...")
             
-            # ШАГ 2: Только после успешной загрузки результатов корректируем материалы
+            # ШАГ 2: Корректируем материалы (если включено)
             if adjust_materials:
                 try:
                     self.status_bar.showMessage("Корректировка материалов в Altawin...")
@@ -1329,6 +1340,7 @@ class LinearOptimizerWindow(QMainWindow):
             success_msg = "✅ Результаты оптимизации успешно загружены в таблицы OPTIMIZED_MOS и OPTDETAIL_MOS"
             if adjust_materials:
                 success_msg += "\n\n✅ Материалы в Altawin также были скорректированы"
+            success_msg += "\n\n💡 Для распределения ячеек используйте кнопку 'Распределить ячейки'"
             
             QMessageBox.information(self, "Успех", success_msg)
             self.status_bar.showMessage("MOS данные успешно загружены")
@@ -1338,6 +1350,64 @@ class LinearOptimizerWindow(QMainWindow):
             self.status_bar.showMessage("Ошибка загрузки MOS данных")
         finally:
             self.upload_mos_to_altawin_button.setEnabled(True)
+            self.distribute_cells_button.setEnabled(True)
+    
+    def on_distribute_cells_clicked(self):
+        """Обработчик нажатия кнопки распределения ячеек"""
+        order_ids_text = self.order_id_input.text().strip()
+        if not order_ids_text:
+            QMessageBox.warning(self, "Ошибка", "Введите grorders_mos_id")
+            return
+
+        try:
+            grorders_mos_id = int(order_ids_text)
+        except ValueError:
+            QMessageBox.warning(self, "Ошибка", "grorders_mos_id должен быть целым числом")
+            return
+
+        # Подтверждение операции
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение распределения ячеек",
+            f"Вы точно хотите распределить ячейки для grorders_mos_id: {grorders_mos_id}?\n\n"
+            f"Это обновит номера ячеек для всех уникальных проемов.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            self.status_bar.showMessage("Распределение ячеек...")
+            self.distribute_cells_button.setEnabled(False)
+            
+            # Вызываем API для распределения ячеек
+            result = self.api_client.distribute_cell_numbers(grorders_mos_id)
+            
+            if result.get("success"):
+                processed_items = result.get("processed_items", 0)
+                total_time = result.get("performance", {}).get("total_time", 0)
+                
+                success_msg = (
+                    f"✅ Распределение ячеек выполнено успешно!\n\n"
+                    f"• Обработано уникальных проемов: {processed_items}\n"
+                    f"• Время выполнения: {total_time} сек"
+                )
+                
+                QMessageBox.information(self, "Успех", success_msg)
+                self.status_bar.showMessage(f"Ячейки распределены ({processed_items} проемов)")
+                
+            else:
+                error_msg = result.get("error", result.get("message", "Неизвестная ошибка"))
+                QMessageBox.warning(self, "Ошибка", f"Ошибка распределения ячеек:\n{error_msg}")
+                self.status_bar.showMessage("Ошибка распределения ячеек")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка распределения ячеек:\n{str(e)}")
+            self.status_bar.showMessage("Ошибка распределения ячеек")
+        finally:
+            self.distribute_cells_button.setEnabled(True)
     
     def show_optimization_settings(self):
         """Показать настройки оптимизации"""

@@ -541,13 +541,15 @@ class SimpleOptimizer:
                 existing_cut['quantity'] += 1
             else:
                 # Создаем новый распил
-                stock['cuts'].append({
+                cut_data = {
                     'profile_id': piece.profile_id,
                     'profile_code': piece.profile_code,  # Добавляем артикул профиля
                     'length': piece.length,
                     'quantity': 1,
                     'order_id': piece.order_id  # Добавляем order_id для точного маппинга
-                })
+                }
+                stock['cuts'].append(cut_data)
+                print(f"🔧 OPTIMIZER: *** ИСПРАВЛЕННАЯ ВЕРСИЯ *** Добавлен cut с order_id: {piece.order_id}")
             
             # Обновляем использованную длину и счетчик
             # Используем только needed_length, так как он уже включает ширину пропила

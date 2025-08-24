@@ -78,6 +78,7 @@ def get_profiles_for_order(order_id: int) -> List[Profile]:
                 quantity=int(row[8])  # total_qty - Количество
             )
             profiles.append(profile)
+            print(f"🔍 DB: *** ОТЛАДКА *** Загружен профиль: goodsid={row[7]}, orderid={row[10]}, length={row[9]}, qty={row[8]}")
         
         con.close()
         
@@ -714,18 +715,22 @@ def enrich_optdetail_mos_fields(
     flugelopentag: str | None = None,
 ) -> Dict[str, Any]:
     """
-    Обогатить поля OPTDETAIL_MOS на основании данных из БД, без модификации вставки.
-    Возвращает словарь с теми же ключами, но с заполненными значениями там, где это возможно.
+    Обогатить поля OPTDETAIL_MOS на основании данных из БД.
+    Возвращает словарь с правильным orderid и обогащенными полями.
+    
+    ВАЖНО: Функция корректно определяет orderid по itemsdetailid если он найден,
+    иначе использует переданный orderid.
     """
     try:
         if ENABLE_LOGGING:
-            print(f"🔧 DB: Обогащение полей OPTDETAIL_MOS для optimized_mos_id={optimized_mos_id}, orderid={orderid}")
+            print(f"🔧 DB: *** ИСПРАВЛЕННАЯ ВЕРСИЯ *** Обогащение полей OPTDETAIL_MOS для optimized_mos_id={optimized_mos_id}, orderid={orderid}")
         
         con = get_db_connection()
         cur = con.cursor()
 
         # Узнаем GOODSID по текущему OPTIMIZED_MOS
         goods_id_for_bar = None
+        grorders_mos_id = None
         try:
             cur.execute(
                 "SELECT GOODSID, GRORDER_MOS_ID FROM OPTIMIZED_MOS WHERE OPTIMIZED_MOS_ID = ?",
@@ -744,92 +749,55 @@ def enrich_optdetail_mos_fields(
             goods_id_for_bar = None
             grorders_mos_id = None
 
-        # 1) Пробуем найти ITEMSDETAIL для данного заказа и материала (или по длине)
+        # Определяем корректный orderid
+        final_orderid = orderid  # По умолчанию используем переданный
+        
+        # 1) Сначала ищем ITEMSDETAIL для обогащения полей
         try:
-            if itemsdetailid is None:
-                # 1.1) Сначала трактуем orderid как GRORDERID (для MOS это верно)
-                if orderid and goods_id_for_bar:
-                    target_length = float(itemlong or 0)
-                    if ENABLE_LOGGING:
-                        print(f"🔧 DB: Поиск ITEMSDETAIL по GRORDERID={orderid}, GOODSID={goods_id_for_bar}, длина={target_length}")
+            if itemsdetailid is None and orderid and goods_id_for_bar:
+                target_length = float(itemlong or 0)
+                if ENABLE_LOGGING:
+                    print(f"🔧 DB: *** НОВАЯ ЛОГИКА *** Поиск ITEMSDETAIL по ORDERID={orderid}, GOODSID={goods_id_for_bar}, длина={target_length}")
+                
+                # Ищем ITEMSDETAIL по ORDERID и GOODSID
+                cur.execute(
+                    (
+                        "SELECT FIRST 1 itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, "
+                        "itd.MODELNO, oi.WIDTH AS O_WIDTH, oi.HEIGHT AS O_HEIGHT, itd.WIDTH AS D_WIDTH, itd.HEIGHT AS D_HEIGHT, itd.THICK "
+                        "FROM ITEMSDETAIL itd "
+                        "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = itd.ORDERITEMSID "
+                        "WHERE oi.ORDERID = ? AND itd.GOODSID = ? "
+                        "ORDER BY ABS(COALESCE(itd.THICK, 0) - ?) ASC, itd.ITEMSDETAILID DESC"
+                    ),
+                    (int(orderid), goods_id_for_bar, target_length),
+                )
+                cand = cur.fetchone()
+                if cand:
+                    itemsdetailid = int(cand[0])
+                    if ug1 is None:
+                        ug1 = float(cand[1]) if cand[1] is not None else None
+                    if ug2 is None:
+                        ug2 = float(cand[2]) if cand[2] is not None else None
+                    # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART
+                    if (izdpart is None or (isinstance(izdpart, str) and izdpart.strip() == "")) and (cand[4] is not None and str(cand[4]).strip() != ""):
+                        izdpart = cand[4]
+                    if (partside is None or (isinstance(partside, str) and partside.strip() == "")) and (cand[3] is not None and str(cand[3]).strip() != ""):
+                        partside = cand[3]
+                    if modelno is None:
+                        modelno = int(cand[5]) if cand[5] is not None else None
+                    # HEIGHT/WIDTH: сперва из ORDERITEMS, затем из ITEMSDETAIL
+                    if modelwidth is None:
+                        modelwidth = int(cand[6]) if cand[6] is not None else (int(cand[8]) if cand[8] is not None else None)
+                    if modelheight is None:
+                        modelheight = int(cand[7]) if cand[7] is not None else (int(cand[9]) if cand[9] is not None else None)
                     
-                    cur.execute(
-                        (
-                            "SELECT FIRST 1 itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, itd.MODELNO, "
-                            "oi.WIDTH AS O_WIDTH, oi.HEIGHT AS O_HEIGHT, itd.WIDTH AS D_WIDTH, itd.HEIGHT AS D_HEIGHT, itd.THICK "
-                            "FROM GRORDERSDETAIL grd "
-                            "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = grd.ORDERITEMSID "
-                            "JOIN ITEMSDETAIL itd ON itd.ORDERITEMSID = oi.ORDERITEMSID "
-                            "WHERE grd.GRORDERID = ? AND itd.GOODSID = ? "
-                            "ORDER BY ABS(COALESCE(itd.THICK, 0) - ?) ASC, itd.ITEMSDETAILID DESC"
-                        ),
-                        (int(orderid), goods_id_for_bar, target_length),
-                    )
-                    cand_gr = cur.fetchone()
-                    if cand_gr:
-                        itemsdetailid = int(cand_gr[0])
-                        if ug1 is None:
-                            ug1 = float(cand_gr[1]) if cand_gr[1] is not None else None
-                        if ug2 is None:
-                            ug2 = float(cand_gr[2]) if cand_gr[2] is not None else None
-                        # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART
-                        # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART (только если источник не пустой)
-                        if (izdpart is None or (isinstance(izdpart, str) and izdpart.strip() == "")) and (cand_gr[4] is not None and str(cand_gr[4]).strip() != ""):
-                            izdpart = cand_gr[4]
-                        if (partside is None or (isinstance(partside, str) and partside.strip() == "")) and (cand_gr[3] is not None and str(cand_gr[3]).strip() != ""):
-                            partside = cand_gr[3]
-                        if modelno is None:
-                            modelno = int(cand_gr[5]) if cand_gr[5] is not None else None
-                        if modelwidth is None:
-                            modelwidth = int(cand_gr[6]) if cand_gr[6] is not None else (int(cand_gr[8]) if cand_gr[8] is not None else None)
-                        if modelheight is None:
-                            modelheight = int(cand_gr[7]) if cand_gr[7] is not None else (int(cand_gr[9]) if cand_gr[9] is not None else None)
-                        
-                        if ENABLE_LOGGING:
-                            print(f"✅ DB: Найден ITEMSDETAIL по GRORDERID: id={itemsdetailid}")
-
-                if orderid and goods_id_for_bar:
-                    target_length = float(itemlong or 0)
                     if ENABLE_LOGGING:
-                        print(f"🔧 DB: Поиск ITEMSDETAIL по ORDERID={orderid}, GOODSID={goods_id_for_bar}, длина={target_length}")
-                    
-                    cur.execute(
-                        (
-                            "SELECT FIRST 1 itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, "
-                            "itd.MODELNO, oi.WIDTH AS O_WIDTH, oi.HEIGHT AS O_HEIGHT, itd.WIDTH AS D_WIDTH, itd.HEIGHT AS D_HEIGHT, itd.THICK "
-                            "FROM ITEMSDETAIL itd "
-                            "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = itd.ORDERITEMSID "
-                            "WHERE oi.ORDERID = ? AND (itd.GOODSID = ?) "
-                            "ORDER BY ABS(COALESCE(itd.THICK, 0) - ?) ASC, itd.ITEMSDETAILID DESC"
-                        ),
-                        (orderid, goods_id_for_bar, target_length),
-                    )
-                    cand = cur.fetchone()
-                    if cand:
-                        itemsdetailid = int(cand[0])
-                        if ug1 is None:
-                            ug1 = float(cand[1]) if cand[1] is not None else None
-                        if ug2 is None:
-                            ug2 = float(cand[2]) if cand[2] is not None else None
-                        # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART
-                        if (izdpart is None or (isinstance(izdpart, str) and izdpart.strip() == "")) and (cand[4] is not None and str(cand[4]).strip() != ""):
-                            izdpart = cand[4]
-                        if (partside is None or (isinstance(partside, str) and partside.strip() == "")) and (cand[3] is not None and str(cand[3]).strip() != ""):
-                            partside = cand[3]
-                        if modelno is None:
-                            modelno = int(cand[5]) if cand[5] is not None else None
-                        # HEIGHT/WIDTH: сперва из ORDERITEMS, затем из ITEMSDETAIL
-                        if modelwidth is None:
-                            modelwidth = int(cand[6]) if cand[6] is not None else (int(cand[8]) if cand[8] is not None else None)
-                        if modelheight is None:
-                            modelheight = int(cand[7]) if cand[7] is not None else (int(cand[9]) if cand[9] is not None else None)
-                        
-                        if ENABLE_LOGGING:
-                            print(f"✅ DB: Найден ITEMSDETAIL по ORDERID: id={itemsdetailid}")
+                        print(f"✅ DB: Найден ITEMSDETAIL по ORDERID и GOODSID: id={itemsdetailid}")
 
-                if itemsdetailid is None and orderid and itemlong is not None:
+                # Резервный поиск только по ORDERID и длине
+                if itemsdetailid is None and itemlong is not None:
                     if ENABLE_LOGGING:
-                        print(f"🔧 DB: Поиск ITEMSDETAIL только по ORDERID={orderid} и длине={itemlong}")
+                        print(f"🔧 DB: Резервный поиск ITEMSDETAIL только по ORDERID={orderid} и длине={itemlong}")
                     
                     cur.execute(
                         (
@@ -838,17 +806,31 @@ def enrich_optdetail_mos_fields(
                             "WHERE oi.ORDERID = ? "
                             "ORDER BY ABS(COALESCE(itd.THICK, 0) - ?) ASC, itd.ITEMSDETAILID DESC"
                         ),
-                        (orderid, float(itemlong)),
+                        (int(orderid), float(itemlong)),
                     )
                     cand_simple = cur.fetchone()
                     if cand_simple:
                         itemsdetailid = int(cand_simple[0])
                         if ENABLE_LOGGING:
-                            print(f"✅ DB: Найден ITEMSDETAIL только по ORDERID: id={itemsdetailid}")
+                            print(f"✅ DB: Найден ITEMSDETAIL резервным поиском: id={itemsdetailid}")
 
         except Exception as e:
             if ENABLE_LOGGING:
                 print(f"⚠️ DB: Ошибка поиска ITEMSDETAIL: {e}")
+
+        # 2) КЛЮЧЕВАЯ ЛОГИКА: Определяем корректный orderid по itemsdetailid
+        if itemsdetailid:
+            correct_orderid = get_orderid_by_itemsdetailid(itemsdetailid)
+            if correct_orderid:
+                final_orderid = correct_orderid
+                if ENABLE_LOGGING:
+                    print(f"✅ DB: *** ИСПРАВЛЕНО *** Корректный orderid определен по itemsdetailid={itemsdetailid}: {final_orderid}")
+            else:
+                if ENABLE_LOGGING:
+                    print(f"⚠️ DB: Не удалось определить orderid по itemsdetailid={itemsdetailid}, используем переданный: {final_orderid}")
+        else:
+            if ENABLE_LOGGING:
+                print(f"⚠️ DB: itemsdetailid не найден, используем переданный orderid: {final_orderid}")
 
         # 2) Если не нашли ITEMSDETAIL, пробуем заполнить поля по умолчанию
         if itemsdetailid is None:
@@ -880,8 +862,9 @@ def enrich_optdetail_mos_fields(
 
         con.close()
 
-        # Формируем результат
+        # Формируем результат с корректным orderid
         result = {
+            "orderid": final_orderid,  # *** ИСПРАВЛЕНО *** Возвращаем корректный orderid
             "itemsdetailid": itemsdetailid,
             "ug1": ug1,
             "ug2": ug2,
@@ -899,7 +882,7 @@ def enrich_optdetail_mos_fields(
         }
         
         if ENABLE_LOGGING:
-            print(f"✅ DB: Обогащение полей завершено: itemsdetailid={itemsdetailid}, modelwidth={modelwidth}, modelheight={modelheight}")
+            print(f"✅ DB: *** ИСПРАВЛЕНО *** Обогащение полей завершено: orderid={final_orderid}, itemsdetailid={itemsdetailid}, modelwidth={modelwidth}, modelheight={modelheight}")
         
         return result
 
@@ -908,6 +891,7 @@ def enrich_optdetail_mos_fields(
             print(f"❌ DB: Ошибка обогащения полей: {e}")
         # Возвращаем исходные значения в случае ошибки
         return {
+            "orderid": orderid,  # В случае ошибки используем исходный orderid
             "itemsdetailid": itemsdetailid,
             "ug1": ug1,
             "ug2": ug2,
@@ -1107,7 +1091,11 @@ def insert_optdetail_mos(
     Вставка записи в OPTDETAIL_MOS. Возвращает созданную запись.
     Используем генератор GEN_OPTDETAIL_MOS_ID и простой INSERT.
     Обязательные поля: OPTIMIZED_MOS_ID, ORDERID, QTY
+    
+    ВАЖНО: orderid должен быть корректным ORDERID из таблицы ORDERS,
+    а не GRORDERID. Правильный orderid определяется из результатов оптимизации.
     """
+    print(f"🔍 DB FUNCTION: *** ИСПРАВЛЕННАЯ ВЕРСИЯ *** insert_optdetail_mos вызвана с orderid={orderid}")
     try:
         con = get_db_connection()
         cur = con.cursor()
@@ -1649,6 +1637,49 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
             }
         }
 
+def get_orderid_by_itemsdetailid(itemsdetailid: int) -> int | None:
+    """
+    Получить корректный ORDERID по ITEMSDETAILID
+    
+    Args:
+        itemsdetailid: ID детали конструкции
+        
+    Returns:
+        ORDERID из таблицы ORDERS или None если не найден
+    """
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+        
+        sql = """
+        SELECT oi.orderid
+        FROM itemsdetail itd
+        JOIN orderitems oi ON oi.orderitemsid = itd.orderitemsid
+        WHERE itd.itemsdetailid = ?
+        """
+        
+        if ENABLE_LOGGING:
+            print(f"🔧 DB: Получение orderid для itemsdetailid={itemsdetailid}")
+        
+        cur.execute(sql, (itemsdetailid,))
+        result = cur.fetchone()
+        con.close()
+        
+        if result:
+            orderid = int(result[0])
+            if ENABLE_LOGGING:
+                print(f"✅ DB: Найден orderid={orderid} для itemsdetailid={itemsdetailid}")
+            return orderid
+        else:
+            if ENABLE_LOGGING:
+                print(f"⚠️ DB: Не найден orderid для itemsdetailid={itemsdetailid}")
+            return None
+            
+    except Exception as e:
+        if ENABLE_LOGGING:
+            print(f"❌ DB: Ошибка получения orderid для itemsdetailid={itemsdetailid}: {e}")
+        return None
+
 def get_warehouse_remainders_by_goodsid(goodsid: int) -> List[Dict[str, Any]]:
     """
     Получить деловые остатки со склада по goodsid
@@ -1695,3 +1726,149 @@ def get_warehouse_remainders_by_goodsid(goodsid: int) -> List[Dict[str, Any]]:
         if ENABLE_LOGGING:
             print(f"❌ Ошибка получения деловых остатков: {e}")
         raise
+
+
+def distribute_cell_numbers(grorder_mos_id: int) -> Dict[str, Any]:
+    """
+    Распределение ячеек для оптимизации москитных сеток.
+    Выполняется ПОСЛЕ загрузки данных оптимизации в altawin.
+    
+    Логика:
+    1. Получаем все уникальные orderitemsid с маркировкой проема по grorder_mos_id
+    2. Проходим циклом for по результатам и присваиваем каждому уникальному проему последовательный номер ячейки
+    3. Обновляем поле cell_number в таблице optdetail_mos
+    
+    Args:
+        grorder_mos_id: ID сменного задания москитных сеток
+        
+    Returns:
+        dict: Результат операции с информацией о количестве обработанных проемов
+    """
+    operation_start_time = time.time()
+    
+    try:
+        if ENABLE_LOGGING:
+            print(f"🔧 DB: Начало распределения ячеек для grorder_mos_id={grorder_mos_id}")
+        
+        con = get_db_connection()
+        cur = con.cursor()
+        
+        # Начинаем транзакцию
+        con.begin()
+        
+        # 1. Получаем все уникальные orderitemsid с маркировкой проема
+        unique_items_sql = """
+        SELECT DISTINCT
+            vd.partside,
+            vd.orderitemsid
+        FROM voptdetail_mos vd
+        WHERE vd.optimizedid IN (
+            SELECT om.optimized_mos_id 
+            FROM optimized_mos om 
+            WHERE om.grorder_mos_id = ?
+        )
+        ORDER BY vd.orderitemsid, vd.partside
+        """
+        
+        if ENABLE_LOGGING:
+            print("🔧 DB: Выполняем SQL-запрос для получения уникальных проемов:")
+            print(f"   SQL: {unique_items_sql}")
+            print(f"   Параметр: grorder_mos_id={grorder_mos_id}")
+        
+        cur.execute(unique_items_sql, (grorder_mos_id,))
+        unique_items = cur.fetchall()
+        
+        if not unique_items:
+            if ENABLE_LOGGING:
+                print(f"⚠️ DB: Не найдено уникальных проемов для grorder_mos_id={grorder_mos_id}")
+            con.rollback()
+            con.close()
+            return {
+                "success": False,
+                "message": "Не найдено уникальных проемов для распределения ячеек",
+                "processed_items": 0,
+                "performance": {
+                    "total_time": round(time.time() - operation_start_time, 2)
+                }
+            }
+        
+        if ENABLE_LOGGING:
+            print(f"✅ DB: Найдено {len(unique_items)} уникальных проемов для распределения ячеек")
+            for i, item in enumerate(unique_items):
+                print(f"   [{i+1}] partside='{item[0]}', orderitemsid={item[1]}")
+        
+        # 2. Проходим циклом for и присваиваем номера ячеек (начинаем с 1)
+        processed_count = 0
+        
+        for i, (partside, orderitemsid) in enumerate(unique_items, start=1):  # Начинаем с 1
+            if ENABLE_LOGGING:
+                print(f"🔧 DB: Обрабатываем проем {i}/{len(unique_items)}: partside='{partside}', orderitemsid={orderitemsid}")
+            
+            # 3. Обновляем номер ячейки для всех записей данного проема
+            update_cell_sql = """
+            UPDATE optdetail_mos odm 
+            SET odm.cell_number = ? 
+            WHERE (odm.itemsdetailid IN (
+                SELECT itd.itemsdetailid 
+                FROM itemsdetail itd 
+                WHERE itd.orderitemsid = ?
+            ))
+            AND (odm.partside = ?)
+            """
+            
+            if ENABLE_LOGGING:
+                print(f"🔧 DB: Выполняем UPDATE с параметрами: cell_number={i}, orderitemsid={orderitemsid}, partside='{partside}'")
+            
+            cur.execute(update_cell_sql, (i, orderitemsid, partside))
+            updated_rows = cur.rowcount if hasattr(cur, 'rowcount') else 0
+            
+            if ENABLE_LOGGING:
+                print(f"✅ DB: Обновлено {updated_rows} записей для проема с cell_number={i}")
+            
+            processed_count += 1
+        
+        # Фиксируем изменения
+        con.commit()
+        con.close()
+        
+        total_time = time.time() - operation_start_time
+        
+        if ENABLE_LOGGING:
+            print(f"✅ DB: Распределение ячеек завершено успешно за {total_time:.2f} секунд")
+            print(f"   Обработано уникальных проемов: {processed_count}")
+        
+        return {
+            "success": True,
+            "message": f"Распределение ячеек выполнено успешно для {processed_count} уникальных проемов",
+            "processed_items": processed_count,
+            "grorder_mos_id": grorder_mos_id,
+            "performance": {
+                "total_time": round(total_time, 2)
+            }
+        }
+        
+    except Exception as e:
+        total_time = time.time() - operation_start_time
+        
+        if ENABLE_LOGGING:
+            print(f"❌ DB: Ошибка распределения ячеек за {total_time:.2f}с: {e}")
+            import traceback
+            print(f"❌ DB: Трассировка ошибки: {traceback.format_exc()}")
+        
+        # Откатываем изменения в случае ошибки
+        try:
+            if 'con' in locals() and con:
+                con.rollback()
+                print("🔄 DB: Выполнен откат транзакции")
+                con.close()
+        except Exception as rollback_error:
+            print(f"❌ DB: Ошибка при откате транзакции: {rollback_error}")
+        
+        return {
+            "success": False,
+            "error": str(e),
+            "processed_items": 0,
+            "performance": {
+                "total_time": round(total_time, 2)
+            }
+        }

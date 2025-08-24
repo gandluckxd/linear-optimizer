@@ -403,6 +403,29 @@ SPECIAL_BUTTON_STYLES = {
         }
     """,
     
+    "distribute": """
+        QPushButton {
+            background-color: #ff8c00;
+            color: white;
+            font-weight: bold;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 12pt;
+            margin: 10px 0px;
+        }
+        QPushButton:hover {
+            background-color: #ff7700;
+        }
+        QPushButton:pressed {
+            background-color: #e67300;
+        }
+        QPushButton:disabled {
+            background-color: #666666;
+            color: #cccccc;
+        }
+    """,
+    
     "copy_csv": """
         QPushButton {
             background-color: #2196F3;
