@@ -206,14 +206,14 @@ class OptimizationSettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Настройки оптимизации")
         self.setModal(True)
-        self.setMinimumSize(400, 350)
+        self.setMinimumSize(550, 500)
         
         # Центрирование относительно родительского окна
         if parent:
             parent_geo = parent.geometry()
-            x = parent_geo.x() + (parent_geo.width() - 400) // 2
-            y = parent_geo.y() + (parent_geo.height() - 350) // 2
-            self.setGeometry(x, y, 400, 350)
+            x = parent_geo.x() + (parent_geo.width() - 550) // 2
+            y = parent_geo.y() + (parent_geo.height() - 500) // 2
+            self.setGeometry(x, y, 550, 500)
         
         # Применение темной темы
         self.setStyleSheet(DIALOG_STYLE)
@@ -261,6 +261,24 @@ class OptimizationSettingsDialog(QDialog):
         self.use_remainders = QCheckBox("Использовать склад остатков")
         form_layout.addRow(self.use_remainders)
         
+        # Минимальный отход (мм)
+        self.min_trash_mm = QSpinBox()
+        self.min_trash_mm.setRange(0, 1000)
+        self.min_trash_mm.setSuffix(" мм")
+        form_layout.addRow("Минимальный отход:", self.min_trash_mm)
+        
+        # Отступ от начала
+        self.begin_indent = QSpinBox()
+        self.begin_indent.setRange(0, 1000)
+        self.begin_indent.setSuffix(" мм")
+        form_layout.addRow("Отступ от начала:", self.begin_indent)
+        
+        # Отступ от конца
+        self.end_indent = QSpinBox()
+        self.end_indent.setRange(0, 1000)
+        self.end_indent.setSuffix(" мм")
+        form_layout.addRow("Отступ от конца:", self.end_indent)
+        
         layout.addLayout(form_layout)
         
         # Кнопки
@@ -288,6 +306,9 @@ class OptimizationSettingsDialog(QDialog):
         self.max_waste_percent.setValue(self.current_settings.get('max_waste_percent', 15))
         self.pair_optimization.setChecked(self.current_settings.get('pair_optimization', True))
         self.use_remainders.setChecked(self.current_settings.get('use_remainders', True))
+        self.min_trash_mm.setValue(self.current_settings.get('min_trash_mm', 50))
+        self.begin_indent.setValue(self.current_settings.get('begin_indent', 10))
+        self.end_indent.setValue(self.current_settings.get('end_indent', 10))
 
     def reset_defaults(self):
         """Сброс к значениям по умолчанию"""
@@ -296,6 +317,9 @@ class OptimizationSettingsDialog(QDialog):
         self.max_waste_percent.setValue(15)
         self.pair_optimization.setChecked(True)  # По умолчанию да
         self.use_remainders.setChecked(True)  # По умолчанию да
+        self.min_trash_mm.setValue(50)
+        self.begin_indent.setValue(10)
+        self.end_indent.setValue(10)
 
     def get_settings(self):
         """Получение настроек"""
@@ -304,7 +328,10 @@ class OptimizationSettingsDialog(QDialog):
             'min_remainder_length': self.min_remainder_length.value(),
             'max_waste_percent': self.max_waste_percent.value(),
             'pair_optimization': self.pair_optimization.isChecked(),
-            'use_remainders': self.use_remainders.isChecked()
+            'use_remainders': self.use_remainders.isChecked(),
+            'min_trash_mm': self.min_trash_mm.value(),
+            'begin_indent': self.begin_indent.value(),
+            'end_indent': self.end_indent.value()
         }
 
 

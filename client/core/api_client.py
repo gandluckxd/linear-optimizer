@@ -4,7 +4,7 @@ API клиент для взаимодействия с Linear Optimizer API
 
 import requests
 from typing import List, Dict
-from core.models import Profile, Stock, OptimizationResult, StockRemainder, StockMaterial
+from core.models import Profile, Stock, OptimizationResult, StockRemainder, StockMaterial, FiberglassDetail, FiberglassSheet, FiberglassLoadDataResponse
 
 class APIClient:
     """Клиент для работы с API"""
@@ -123,6 +123,125 @@ class APIClient:
             
         except requests.RequestException as e:
             raise Exception(f"Ошибка получения материалов: {str(e)}")
+
+    def get_fiberglass_details(self, grorder_mos_id: int) -> List[FiberglassDetail]:
+        """Получить детали полотен фибергласса для раскроя"""
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/fiberglass/get-details",
+                json={"grorder_mos_id": grorder_mos_id},
+                timeout=30
+            )
+            response.raise_for_status()
+
+            details = []
+            for data in response.json():
+                detail = FiberglassDetail(
+                    grorder_mos_id=data['grorder_mos_id'],
+                    orderid=data['orderid'],
+                    orderitemsid=data['orderitemsid'],
+                    itemsdetailid=data['itemsdetailid'],
+                    item_name=data['item_name'],
+                    width=data['width'],
+                    height=data['height'],
+                    quantity=data['quantity'],
+                    modelno=data.get('modelno'),
+                    partside=data.get('partside'),
+                    izdpart=data.get('izdpart'),
+                    goodsid=data['goodsid'],
+                    marking=data['marking']
+                )
+                details.append(detail)
+
+            return details
+
+        except requests.RequestException as e:
+            raise Exception(f"Ошибка получения деталей полотен: {str(e)}")
+
+    def get_fiberglass_remainders(self, goodsids: List[int]) -> List[FiberglassSheet]:
+        """Получить остатки полотен со склада"""
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/fiberglass/get-remainders",
+                json={"goodsids": goodsids},
+                timeout=30
+            )
+            response.raise_for_status()
+
+            remainders = []
+            for data in response.json():
+                remainder = FiberglassSheet(
+                    goodsid=data['goodsid'],
+                    marking=data['marking'],
+                    width=data['width'],
+                    height=data['height'],
+                    is_remainder=data['is_remainder'],
+                    remainder_id=data.get('remainder_id'),
+                    quantity=data['quantity'],
+                    area_mm2=data.get('area_mm2')
+                )
+                remainders.append(remainder)
+
+            return remainders
+
+        except requests.RequestException as e:
+            raise Exception(f"Ошибка получения остатков полотен: {str(e)}")
+
+    def get_fiberglass_materials(self, goodsids: List[int]) -> List[FiberglassSheet]:
+        """Получить материалы полотен со склада"""
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/fiberglass/get-materials",
+                json={"goodsids": goodsids},
+                timeout=30
+            )
+            response.raise_for_status()
+
+            materials = []
+            data_list = response.json()
+            print(f"📦 Клиент получил {len(data_list)} материалов полотен от сервера")
+
+            for data in data_list:
+                material = FiberglassSheet(
+                    goodsid=data['goodsid'],
+                    marking=data['marking'],
+                    width=data['width'],
+                    height=data['height'],
+                    is_remainder=data['is_remainder'],
+                    remainder_id=data.get('remainder_id'),
+                    quantity=data['quantity'],
+                    area_mm2=data.get('area_mm2')
+                )
+                materials.append(material)
+                print(f"  - {material.marking}: {material.width}x{material.height}мм = {material.quantity} рулонов")
+
+            return materials
+
+        except requests.RequestException as e:
+            raise Exception(f"Ошибка получения материалов полотен: {str(e)}")
+
+    def load_fiberglass_data(self, grorder_mos_id: int) -> FiberglassLoadDataResponse:
+        """Загрузить все данные фибергласса по grorder_mos_id"""
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/fiberglass/load-data",
+                json={"grorder_mos_id": grorder_mos_id},
+                timeout=30
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            return FiberglassLoadDataResponse(
+                details=data['details'],
+                materials=data['materials'],
+                remainders=data['remainders'],
+                total_details=data['total_details'],
+                total_materials=data['total_materials'],
+                total_remainders=data['total_remainders']
+            )
+
+        except requests.RequestException as e:
+            raise Exception(f"Ошибка загрузки данных фибергласса: {str(e)}")
 
     def get_grorders_by_mos_id(self, grorders_mos_id: int) -> List[int]:
         """Получить список grorderid по идентификатору сменного задания москитных сеток"""

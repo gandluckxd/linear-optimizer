@@ -26,11 +26,12 @@ import logging
 # Импорты для модульной архитектуры
 from core.api_client import get_api_client
 from core.optimizer import LinearOptimizer, CuttingStockOptimizer, OptimizationSettings, SolverType
-from core.models import Profile, Stock, OptimizationResult, StockRemainder, StockMaterial
+from core.models import Profile, Stock, OptimizationResult, StockRemainder, StockMaterial, FiberglassDetail, FiberglassSheet
 from .table_widgets import (
     _create_text_item, _create_numeric_item, setup_table_columns,
     fill_profiles_table, fill_stock_table, fill_optimization_results_table,
-    fill_stock_remainders_table, fill_stock_materials_table,
+    fill_stock_remainders_table, fill_stock_materials_table, fill_fabric_details_table,
+    fill_fabric_remainders_table, fill_fabric_materials_table,
     update_table_column_widths, clear_table, enable_table_sorting,
     copy_table_to_clipboard, copy_table_as_csv
 )
@@ -48,13 +49,14 @@ class DataLoadThread(QThread):
     debug_step = pyqtSignal(str)
     error_occurred = pyqtSignal(str, str, str)  # title, message, icon
     success_occurred = pyqtSignal()
-    data_loaded = pyqtSignal(list, dict)  # profiles, stock_data
+    data_loaded = pyqtSignal(list, dict, list, dict)  # profiles, stock_data, fabric_details, fabric_stock_data
     finished_loading = pyqtSignal()
     
-    def __init__(self, api_client, order_ids):
+    def __init__(self, api_client, order_ids, grorders_mos_id=None):
         super().__init__()
         self.api_client = api_client
         self.order_ids = order_ids if isinstance(order_ids, list) else [order_ids]
+        self.grorders_mos_id = grorders_mos_id
     
     def run(self):
         """Основная логика загрузки данных"""
@@ -84,7 +86,7 @@ class DataLoadThread(QThread):
             self.debug_step.emit("📦 Загрузка материалов со склада...")
             stock_materials = self.api_client.get_stock_materials(profile_codes)
             self.debug_step.emit(f"✅ Загружено {len(stock_materials)} материалов")
-            
+
             # Детальная информация о загруженных материалах
             if stock_materials:
                 self.debug_step.emit("📋 Детали загруженных материалов:")
@@ -92,9 +94,78 @@ class DataLoadThread(QThread):
                     self.debug_step.emit(f"  - {material.profile_code}: {material.quantity_pieces} хлыстов по {material.length}мм")
             else:
                 self.debug_step.emit("⚠️ ВНИМАНИЕ: Не загружен ни один материал!")
-            
+
+            # Загружаем данные полотен (фибргласс)
+            self.debug_step.emit("🪟 Загрузка данных полотен москитных сеток...")
+
+            # Используем grorders_mos_id, переданный в конструктор потока
+            grorders_mos_id = self.grorders_mos_id
+            if grorders_mos_id:
+                self.debug_step.emit(f"🔧 Используем grorders_mos_id={grorders_mos_id} для загрузки данных полотен")
+            else:
+                self.debug_step.emit("⚠️ grorders_mos_id не задан, пропускаем загрузку данных полотен")
+
+            fabric_details = []
+            fabric_remainders = []
+            fabric_materials = []
+
+            if grorders_mos_id:
+                try:
+                    # Загружаем детали полотен
+                    self.debug_step.emit(f"📋 Загрузка деталей полотен для grorders_mos_id={grorders_mos_id}...")
+                    fabric_details = self.api_client.get_fiberglass_details(grorders_mos_id)
+                    self.debug_step.emit(f"✅ Загружено {len(fabric_details)} деталей полотен")
+
+                    if fabric_details:
+                        self.debug_step.emit("📋 Детали загруженных полотен:")
+                        for detail in fabric_details:
+                            self.debug_step.emit(f"  - {detail.item_name}: {detail.width}мм x {detail.height}мм, кол-во: {detail.quantity}")
+
+                        # Получаем уникальные goodsids из деталей для загрузки материалов со склада
+                        temp_goodsids = list(set(detail.goodsid for detail in fabric_details if detail.goodsid))
+                        fabric_codes = list(set(detail.marking for detail in fabric_details if detail.marking))
+                        self.debug_step.emit(f"🔧 Найдено {len(temp_goodsids)} уникальных goodsids: {temp_goodsids}")
+                        self.debug_step.emit(f"🔧 Найдено {len(fabric_codes)} уникальных артикулов полотен: {fabric_codes}")
+
+                        # Загружаем остатки полотен со склада
+                        self.debug_step.emit("📦 Загрузка остатков полотен со склада...")
+                        try:
+                            fabric_remainders = self.api_client.get_fiberglass_remainders(temp_goodsids)
+                            self.debug_step.emit(f"✅ Загружено {len(fabric_remainders)} остатков полотен")
+                        except Exception as e:
+                            self.debug_step.emit(f"⚠️ Ошибка загрузки остатков полотен: {e}")
+                            fabric_remainders = []
+
+                        # Загружаем материалы полотен со склада
+                        self.debug_step.emit("📦 Загрузка материалов полотен со склада...")
+                        try:
+                            fabric_materials = self.api_client.get_fiberglass_materials(temp_goodsids)
+                            self.debug_step.emit(f"✅ Загружено {len(fabric_materials)} материалов полотен")
+                        except Exception as e:
+                            self.debug_step.emit(f"⚠️ Ошибка загрузки материалов полотен: {e}")
+                            fabric_materials = []
+
+                        if fabric_materials:
+                            self.debug_step.emit("📋 Детали загруженных материалов полотен:")
+                            for material in fabric_materials:
+                                self.debug_step.emit(f"  - {material.profile_code}: {material.quantity_pieces} полотен {material.width}мм x {material.height}мм")
+                        else:
+                            self.debug_step.emit("⚠️ ВНИМАНИЕ: Не загружен ни один материал полотен!")
+                    else:
+                        self.debug_step.emit("⚠️ ВНИМАНИЕ: Не найдено деталей полотен для раскроя!")
+
+                except Exception as e:
+                    self.debug_step.emit(f"❌ Ошибка загрузки данных полотен: {e}")
+            else:
+                self.debug_step.emit("⚠️ ВНИМАНИЕ: Не удалось определить grorders_mos_id для загрузки полотен")
+
             # Отправляем данные в главный поток
-            self.data_loaded.emit(all_profiles, {'remainders': stock_remainders, 'materials': stock_materials})
+            self.data_loaded.emit(
+                all_profiles,
+                {'remainders': stock_remainders, 'materials': stock_materials},
+                fabric_details,
+                {'remainders': fabric_remainders, 'materials': fabric_materials}
+            )
             self.debug_step.emit("🎉 Загрузка данных завершена успешно!")
             self.success_occurred.emit()
             
@@ -181,7 +252,7 @@ class LinearOptimizerWindow(QMainWindow):
     debug_step_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str, str, str)  # title, message, icon
     success_signal = pyqtSignal()
-    data_loaded_signal = pyqtSignal(list, dict)  # profiles, stock_data
+    data_loaded_signal = pyqtSignal(list, dict, list, dict)  # profiles, stock_data, fabric_details, fabric_stock_data
     restore_button_signal = pyqtSignal()
     
     # Сигналы для оптимизации
@@ -198,10 +269,25 @@ class LinearOptimizerWindow(QMainWindow):
         self.current_order_id = None
         self.profiles = []
         self.stocks = []  # Для обратной совместимости
-        self.stock_remainders = []  # Остатки со склада
-        self.stock_materials = []   # Цельные материалы со склада
+        self.stock_remainders = []  # Остатки профилей со склада
+        self.stock_materials = []   # Цельные материалы профилей со склада
+        self.fabric_details = []    # Детали полотен для раскроя
+        self.fabric_remainders = [] # Остатки полотен со склада
+        self.fabric_materials = []  # Цельные материалы полотен со склада
         self.optimization_result = None
         self.current_settings = OptimizationSettings()
+        
+        # Инициализация параметров оптимизации (значения по умолчанию)
+        self.optimization_params = {
+            'blade_width': 5,
+            'min_remainder_length': 300,
+            'max_waste_percent': 15,
+            'pair_optimization': True,
+            'use_remainders': True,
+            'min_trash_mm': 50,
+            'begin_indent': 10,
+            'end_indent': 10
+        }
         
         # Инициализация диалогов
         self.debug_dialog = None
@@ -331,12 +417,24 @@ class LinearOptimizerWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
         
+        # Меню Инструменты
+        tools_menu = menubar.addMenu("Инструменты")
+        
+        fiberglass_action = QAction("Оптимизация фибергласса", self)
+        fiberglass_action.setShortcut("Ctrl+F")
+        fiberglass_action.triggered.connect(self.open_fiberglass_optimizer)
+        tools_menu.addAction(fiberglass_action)
+        
+        # Меню Параметры
+        params_menu = menubar.addMenu("Параметры")
+        
+        optimization_params_action = QAction("Параметры оптимизации", self)
+        optimization_params_action.setShortcut("Ctrl+P")
+        optimization_params_action.triggered.connect(self.show_optimization_settings)
+        params_menu.addAction(optimization_params_action)
+        
         # Меню Настройки
         settings_menu = menubar.addMenu("Настройки")
-        
-        optimization_settings_action = QAction("Параметры оптимизации", self)
-        optimization_settings_action.triggered.connect(self.show_optimization_settings)
-        settings_menu.addAction(optimization_settings_action)
         
         api_settings_action = QAction("Настройки API", self)
         api_settings_action.triggered.connect(self.show_api_settings)
@@ -360,23 +458,32 @@ class LinearOptimizerWindow(QMainWindow):
         top_group = self.create_order_info_group()
         layout.addWidget(top_group)
         
-        # Средняя часть - данные (профили и склады)
+        # Средняя часть - данные (профили и полотна)
         middle_splitter = QSplitter(Qt.Horizontal)
         
-        # Левая часть - профили для распила
-        left_group = self.create_profiles_group()
+        # Левая часть - профили
+        left_group = self.create_profiles_section()
         middle_splitter.addWidget(left_group)
         
-        # Правая часть - склады (разделенные)
-        right_group = self.create_stock_groups()
+        # Правая часть - полотна
+        right_group = self.create_fabric_section()
         middle_splitter.addWidget(right_group)
         
         middle_splitter.setSizes([500, 900])
         layout.addWidget(middle_splitter)
         
-        # Нижняя часть - параметры оптимизации
-        params_group = self.create_optimization_params_group()
-        layout.addWidget(params_group)
+        # Кнопка оптимизации
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+        
+        self.optimize_button = QPushButton("🚀 Запустить оптимизацию")
+        self.optimize_button.clicked.connect(self.on_optimize_clicked)
+        self.optimize_button.setEnabled(False)
+        self.optimize_button.setStyleSheet(SPECIAL_BUTTON_STYLES["optimize"])
+        buttons_layout.addWidget(self.optimize_button)
+        
+        buttons_layout.addStretch()
+        layout.addLayout(buttons_layout)
         
         self.tabs.addTab(order_tab, "📊 Данные заказа")
 
@@ -410,11 +517,15 @@ class LinearOptimizerWindow(QMainWindow):
         
         return group
 
-    def create_profiles_group(self):
-        """Создание группы профилей для распила"""
-        group = QGroupBox("Профили для распила")
-        layout = QVBoxLayout(group)
-
+    def create_profiles_section(self):
+        """Создание раздела профилей (профили + склады профилей)"""
+        main_widget = QWidget()
+        layout = QVBoxLayout(main_widget)
+        
+        # Группа профилей для распила
+        profiles_group = QGroupBox("Профили для распила")
+        profiles_layout = QVBoxLayout(profiles_group)
+        
         # Таблица профилей
         self.profiles_table = QTableWidget()
         setup_table_columns(self.profiles_table, [
@@ -423,10 +534,102 @@ class LinearOptimizerWindow(QMainWindow):
         
         # Включаем сортировку
         enable_table_sorting(self.profiles_table, True)
-        self.profiles_table.setMinimumHeight(300)
-        layout.addWidget(self.profiles_table)
+        self.profiles_table.setMinimumHeight(200)
+        profiles_layout.addWidget(self.profiles_table)
         
-        return group
+        # Создаем вертикальный сплиттер для двух таблиц складов профилей
+        splitter = QSplitter(Qt.Vertical)
+        
+        # Группа остатков профилей на складе
+        remainders_group = QGroupBox("Склад остатков профилей")
+        remainders_layout = QVBoxLayout(remainders_group)
+        
+        self.stock_remainders_table = QTableWidget()
+        setup_table_columns(self.stock_remainders_table, [
+            'Наименование', 'Длина (мм)', 'Количество палок'
+        ])
+        enable_table_sorting(self.stock_remainders_table, True)
+        self.stock_remainders_table.setMinimumHeight(150)
+        remainders_layout.addWidget(self.stock_remainders_table)
+        
+        # Группа материалов профилей на складе
+        materials_group = QGroupBox("Склад материалов профилей")
+        materials_layout = QVBoxLayout(materials_group)
+        
+        self.stock_materials_table = QTableWidget()
+        setup_table_columns(self.stock_materials_table, [
+            'Наименование', 'Длина (мм)', 'Количество шт'
+        ])
+        enable_table_sorting(self.stock_materials_table, True)
+        self.stock_materials_table.setMinimumHeight(150)
+        materials_layout.addWidget(self.stock_materials_table)
+        
+        # Добавляем группы в сплиттер
+        splitter.addWidget(remainders_group)
+        splitter.addWidget(materials_group)
+        splitter.setSizes([150, 150])
+        
+        layout.addWidget(profiles_group)
+        layout.addWidget(splitter)
+        
+        return main_widget
+
+    def create_fabric_section(self):
+        """Создание раздела полотен москитных сеток"""
+        main_widget = QWidget()
+        layout = QVBoxLayout(main_widget)
+        
+        # Группа полотен для раскроя
+        fabric_group = QGroupBox("Полотна для раскроя")
+        fabric_layout = QVBoxLayout(fabric_group)
+        
+        # Таблица полотен
+        self.fabric_table = QTableWidget()
+        setup_table_columns(self.fabric_table, [
+            'Элемент', 'Артикул полотна', 'Ширина (мм)', 'Высота (мм)', 'Количество'
+        ])
+        
+        # Включаем сортировку
+        enable_table_sorting(self.fabric_table, True)
+        self.fabric_table.setMinimumHeight(200)
+        fabric_layout.addWidget(self.fabric_table)
+        
+        # Создаем вертикальный сплиттер для двух таблиц складов полотен
+        splitter = QSplitter(Qt.Vertical)
+        
+        # Группа остатков полотен на складе
+        fabric_remainders_group = QGroupBox("Склад остатков полотен")
+        fabric_remainders_layout = QVBoxLayout(fabric_remainders_group)
+        
+        self.fabric_remainders_table = QTableWidget()
+        setup_table_columns(self.fabric_remainders_table, [
+            'Артикул', 'Ширина (мм)', 'Высота (мм)', 'Количество'
+        ])
+        enable_table_sorting(self.fabric_remainders_table, True)
+        self.fabric_remainders_table.setMinimumHeight(150)
+        fabric_remainders_layout.addWidget(self.fabric_remainders_table)
+        
+        # Группа материалов полотен на складе
+        fabric_materials_group = QGroupBox("Склад материалов полотен")
+        fabric_materials_layout = QVBoxLayout(fabric_materials_group)
+        
+        self.fabric_materials_table = QTableWidget()
+        setup_table_columns(self.fabric_materials_table, [
+            'Артикул', 'Ширина (мм)', 'Высота (мм)', 'Количество'
+        ])
+        enable_table_sorting(self.fabric_materials_table, True)
+        self.fabric_materials_table.setMinimumHeight(150)
+        fabric_materials_layout.addWidget(self.fabric_materials_table)
+        
+        # Добавляем группы в сплиттер
+        splitter.addWidget(fabric_remainders_group)
+        splitter.addWidget(fabric_materials_group)
+        splitter.setSizes([150, 150])
+        
+        layout.addWidget(fabric_group)
+        layout.addWidget(splitter)
+        
+        return main_widget
 
     def create_stock_groups(self):
         """Создание групп складов (остатки и материалы)"""
@@ -437,8 +640,8 @@ class LinearOptimizerWindow(QMainWindow):
         # Создаем вертикальный сплиттер для двух таблиц складов
         splitter = QSplitter(Qt.Vertical)
         
-        # Группа остатков на складе
-        remainders_group = QGroupBox("Склад остатков")
+        # Группа остатков профилей на складе
+        remainders_group = QGroupBox("Склад остатков профилей")
         remainders_layout = QVBoxLayout(remainders_group)
         
         self.stock_remainders_table = QTableWidget()
@@ -449,8 +652,8 @@ class LinearOptimizerWindow(QMainWindow):
         self.stock_remainders_table.setMinimumHeight(200)
         remainders_layout.addWidget(self.stock_remainders_table)
         
-        # Группа материалов на складе
-        materials_group = QGroupBox("Склад материалов")
+        # Группа материалов профилей на складе
+        materials_group = QGroupBox("Склад материалов профилей")
         materials_layout = QVBoxLayout(materials_group)
         
         self.stock_materials_table = QTableWidget()
@@ -470,87 +673,7 @@ class LinearOptimizerWindow(QMainWindow):
         
         return main_widget
 
-    def create_optimization_params_group(self):
-        """Создание группы параметров оптимизации"""
-        params_group = QGroupBox("Параметры оптимизации")
-        layout = QFormLayout()
-        
-        # Ширина распила
-        self.blade_width = QSpinBox()
-        self.blade_width.setRange(1, 20)
-        self.blade_width.setValue(5)  # По умолчанию 5
-        self.blade_width.setSuffix(" мм")
-        layout.addRow("Ширина распила:", self.blade_width)
-        
-        # Минимальный остаток
-        self.min_remainder_length = QSpinBox()
-        self.min_remainder_length.setRange(10, 10000)
-        self.min_remainder_length.setValue(300)  # По умолчанию 300
-        self.min_remainder_length.setSuffix(" мм")
-        layout.addRow("Минимальный остаток:", self.min_remainder_length)
 
-        # Минимальный отход (мм)
-        self.min_trash_mm = QSpinBox()
-        self.min_trash_mm.setRange(0, 1000)
-        self.min_trash_mm.setValue(50)
-        self.min_trash_mm.setSuffix(" мм")
-        layout.addRow("Минимальный отход:", self.min_trash_mm)
-
-        # Отступ от начала (begin indent)
-        self.begin_indent = QSpinBox()
-        self.begin_indent.setRange(0, 1000)
-        self.begin_indent.setValue(10)
-        self.begin_indent.setSuffix(" мм")
-        layout.addRow("Отступ от начала:", self.begin_indent)
-
-        # Отступ от конца (end indent)
-        self.end_indent = QSpinBox()
-        self.end_indent.setRange(0, 1000)
-        self.end_indent.setValue(10)
-        self.end_indent.setSuffix(" мм")
-        layout.addRow("Отступ от конца:", self.end_indent)
-        
-        # Максимальный отход
-        self.max_waste_percent = QSpinBox()
-        self.max_waste_percent.setRange(1, 50)
-        self.max_waste_percent.setValue(15)
-        self.max_waste_percent.setSuffix(" %")
-        self.max_waste_percent.setStyleSheet(WIDGET_CONFIGS["target_waste_percent"])
-        layout.addRow("🎯 Максимальный отход:", self.max_waste_percent)
-        
-        # Парная оптимизация
-        self.pair_optimization = QCheckBox("Парная оптимизация")
-        self.pair_optimization.setChecked(True)  # По умолчанию да
-        layout.addRow(self.pair_optimization)
-        
-        # Использование склада остатков
-        self.use_remainders = QCheckBox("Использовать склад остатков")
-        self.use_remainders.setChecked(True)  # По умолчанию да
-        layout.addRow(self.use_remainders)
-        
-        # Кнопки на одном уровне
-        buttons_layout = QHBoxLayout()
-        
-        # Кнопка сохранения настроек (слева)
-        self.save_settings_button = QPushButton("💾 Сохранить параметры")
-        self.save_settings_button.clicked.connect(self.on_save_settings_clicked)
-        self.save_settings_button.setStyleSheet(SPECIAL_BUTTON_STYLES["save_settings"])
-        buttons_layout.addWidget(self.save_settings_button)
-        
-        # Добавляем растяжку между кнопками
-        buttons_layout.addStretch()
-        
-        # Кнопка оптимизации (справа)
-        self.optimize_button = QPushButton("🚀 Запустить оптимизацию")
-        self.optimize_button.clicked.connect(self.on_optimize_clicked)
-        self.optimize_button.setEnabled(False)
-        self.optimize_button.setStyleSheet(SPECIAL_BUTTON_STYLES["optimize"])
-        buttons_layout.addWidget(self.optimize_button)
-        
-        layout.addRow(buttons_layout)
-        
-        params_group.setLayout(layout)
-        return params_group
 
     def create_results_tab(self):
         """Создание вкладки результатов оптимизации"""
@@ -733,7 +856,7 @@ class LinearOptimizerWindow(QMainWindow):
             self.data_load_thread.wait()
         
         # Создаем и настраиваем новый поток загрузки
-        self.data_load_thread = DataLoadThread(self.api_client, grorder_ids)
+        self.data_load_thread = DataLoadThread(self.api_client, grorder_ids, mos_id)
         
         # Подключаем сигналы потока к методам главного окна
         self.data_load_thread.debug_step.connect(self._add_debug_step_safe)
@@ -769,14 +892,15 @@ class LinearOptimizerWindow(QMainWindow):
         self.progress_dialog.show()
         
         # Собираем параметры оптимизации
-        self.current_settings.blade_width = self.blade_width.value()
-        self.current_settings.min_remainder_length = self.min_remainder_length.value()
-        self.current_settings.min_trash_mm = self.min_trash_mm.value()
-        self.current_settings.begin_indent = self.begin_indent.value()
-        self.current_settings.end_indent = self.end_indent.value()
-        self.current_settings.max_waste_percent = self.max_waste_percent.value()
-        self.current_settings.pair_optimization = self.pair_optimization.isChecked()
-        self.current_settings.use_remainders = self.use_remainders.isChecked()
+        # Обновляем настройки из сохраненных параметров
+        self.current_settings.blade_width = self.optimization_params['blade_width']
+        self.current_settings.min_remainder_length = self.optimization_params['min_remainder_length']
+        self.current_settings.min_trash_mm = self.optimization_params['min_trash_mm']
+        self.current_settings.begin_indent = self.optimization_params['begin_indent']
+        self.current_settings.end_indent = self.optimization_params['end_indent']
+        self.current_settings.max_waste_percent = self.optimization_params['max_waste_percent']
+        self.current_settings.pair_optimization = self.optimization_params['pair_optimization']
+        self.current_settings.use_remainders = self.optimization_params['use_remainders']
         
         # Формируем список хлыстов согласно настройке использования остатков
         stocks_for_optimization = self.stocks
@@ -848,13 +972,18 @@ class LinearOptimizerWindow(QMainWindow):
         if self.debug_dialog:
             QTimer.singleShot(2000, self.debug_dialog.close)
     
-    def _update_tables_safe(self, profiles, stock_data):
+    def _update_tables_safe(self, profiles, stock_data, fabric_details, fabric_stock_data):
         """Thread-safe обновление таблиц"""
         try:
             # Сохраняем данные
             self.profiles = profiles
             self.stock_remainders = stock_data.get('remainders', [])
             self.stock_materials = stock_data.get('materials', [])
+
+            # Сохраняем данные полотен
+            self.fabric_details = fabric_details
+            self.fabric_remainders = fabric_stock_data.get('remainders', [])
+            self.fabric_materials = fabric_stock_data.get('materials', [])
             
             # Парсим ID заказов для отображения
             order_ids_text = self.order_id_input.text().strip()
@@ -914,17 +1043,24 @@ class LinearOptimizerWindow(QMainWindow):
             
             print(f"🔧 DEBUG: Создано {len(self.stocks)} хлыстов для оптимизации")
             
-            # Обновляем таблицы
+            # Обновляем таблицы профилей
             fill_profiles_table(self.profiles_table, [p.__dict__ for p in profiles])
             fill_stock_remainders_table(self.stock_remainders_table, [r.__dict__ for r in self.stock_remainders])
             fill_stock_materials_table(self.stock_materials_table, [m.__dict__ for m in self.stock_materials])
+
+            # Обновляем таблицы полотен
+            # Для полотен пока используем тот же формат, что и для профилей, но с другими колонками
+            fill_fabric_details_table(self.fabric_table, [f.__dict__ for f in fabric_details])
+            fill_fabric_remainders_table(self.fabric_remainders_table, [r.__dict__ for r in self.fabric_remainders])
+            fill_fabric_materials_table(self.fabric_materials_table, [m.__dict__ for m in self.fabric_materials])
             
             # Обновляем информацию о заказах
             total_stock_items = len(self.stock_remainders) + len(self.stock_materials)
+            total_fabric_stock_items = len(self.fabric_remainders) + len(self.fabric_materials)
             if len(order_ids) == 1:
-                order_info = f"Заказ {order_ids[0]}: {len(profiles)} профилей, {len(self.stock_remainders)} остатков, {len(self.stock_materials)} материалов"
+                order_info = f"Заказ {order_ids[0]}: {len(profiles)} профилей, {len(fabric_details)} полотен, {total_stock_items} материалов профилей, {total_fabric_stock_items} материалов полотен"
             else:
-                order_info = f"Заказы {', '.join(map(str, order_ids))}: {len(profiles)} профилей, {len(self.stock_remainders)} остатков, {len(self.stock_materials)} материалов"
+                order_info = f"Заказы {', '.join(map(str, order_ids))}: {len(profiles)} профилей, {len(fabric_details)} полотен, {total_stock_items} материалов профилей, {total_fabric_stock_items} материалов полотен"
             
             self.order_info_label.setText(order_info)
             
@@ -935,7 +1071,10 @@ class LinearOptimizerWindow(QMainWindow):
             QTimer.singleShot(500, lambda: [
                 update_table_column_widths(self.profiles_table),
                 update_table_column_widths(self.stock_remainders_table),
-                update_table_column_widths(self.stock_materials_table)
+                update_table_column_widths(self.stock_materials_table),
+                update_table_column_widths(self.fabric_table),
+                update_table_column_widths(self.fabric_remainders_table),
+                update_table_column_widths(self.fabric_materials_table)
             ])
             
         except Exception as e:
@@ -1096,6 +1235,9 @@ class LinearOptimizerWindow(QMainWindow):
         clear_table(self.profiles_table)
         clear_table(self.stock_remainders_table)
         clear_table(self.stock_materials_table)
+        clear_table(self.fabric_table)
+        clear_table(self.fabric_remainders_table)
+        clear_table(self.fabric_materials_table)
         clear_table(self.results_table)
         self.optimization_result = None
         self.upload_mos_to_altawin_button.setEnabled(False)
@@ -1104,7 +1246,7 @@ class LinearOptimizerWindow(QMainWindow):
         self.order_info_label.setText("<заказ не загружен>")
         self.status_bar.showMessage("Готов к работе")
         self.tabs.setCurrentIndex(0)
-        
+
         # Сбрасываем галочку корректировки материалов
         self.adjust_materials_checkbox.setChecked(False)
 
@@ -1411,24 +1553,21 @@ class LinearOptimizerWindow(QMainWindow):
     
     def show_optimization_settings(self):
         """Показать настройки оптимизации"""
-        current_settings = {
-            'blade_width': self.blade_width.value(),
-            'min_remainder_length': self.min_remainder_length.value(),
-            'max_waste_percent': self.max_waste_percent.value(),
-            'pair_optimization': self.pair_optimization.isChecked(),
-            'use_remainders': self.use_remainders.isChecked()
-        }
-        
-        dialog = OptimizationSettingsDialog(self, current_settings)
+        dialog = OptimizationSettingsDialog(self, self.optimization_params)
         if dialog.exec_() == QDialog.Accepted:
-            settings = dialog.get_settings()
+            # Получаем новые настройки из диалога
+            self.optimization_params = dialog.get_settings()
             
-            # Применяем новые настройки
-            self.blade_width.setValue(settings['blade_width'])
-            self.min_remainder_length.setValue(settings['min_remainder_length'])
-            self.max_waste_percent.setValue(settings['max_waste_percent'])
-            self.pair_optimization.setChecked(settings['pair_optimization'])
-            self.use_remainders.setChecked(settings['use_remainders'])
+            # Обновляем текущие настройки оптимизации
+            self.current_settings.blade_width = self.optimization_params['blade_width']
+            self.current_settings.min_remainder_length = self.optimization_params['min_remainder_length'] 
+            self.current_settings.max_waste_percent = self.optimization_params['max_waste_percent']
+            self.current_settings.pair_optimization = self.optimization_params['pair_optimization']
+            self.current_settings.use_remainders = self.optimization_params['use_remainders']
+            
+            # Показываем сообщение об успешном сохранении
+            QMessageBox.information(self, "Параметры сохранены", 
+                "Новые параметры оптимизации сохранены и будут применены при следующем запуске оптимизации.")
     
     def show_api_settings(self):
         """Показать настройки API"""
@@ -1480,6 +1619,22 @@ class LinearOptimizerWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка при копировании таблицы как CSV: {str(e)}")
             self.status_bar.showMessage("❌ Ошибка копирования таблицы как CSV")
+
+    def open_fiberglass_optimizer(self):
+        """Открытие окна оптимизации фибергласса"""
+        try:
+            from .fiberglass_window import FiberglassOptimizationWindow
+            
+            # Создаем и показываем окно фибергласса
+            self.fiberglass_window = FiberglassOptimizationWindow(self)
+            self.fiberglass_window.show()
+            
+            self.status_bar.showMessage("Открыто окно оптимизации фибергласса")
+            
+        except ImportError as e:
+            QMessageBox.critical(self, "Ошибка импорта", f"Не удалось загрузить модуль фибергласса: {str(e)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка открытия окна фибергласса: {str(e)}")
 
     def closeEvent(self, event):
         """Обработка закрытия приложения"""

@@ -6,6 +6,7 @@ import fdb
 import time
 from modules.config import DB_CONFIG, ENABLE_LOGGING
 from modules.models import Profile, Stock, MoskitkaProfile, StockRemainder, StockMaterial, GrordersMos, OptimizedMos, OptDetailMos
+from modules.models import FiberglassDetail, FiberglassSheet, FiberglassLoadDataResponse
 from typing import List, Dict, Any
 
 def get_db_connection():
@@ -578,7 +579,7 @@ def save_optimization_result(optimization_result, save_to_order: bool, create_cu
         # Откатываем транзакцию при ошибке
         try:
             con.rollback()
-        except:
+        except Exception:
             pass
         
         if ENABLE_LOGGING:
@@ -919,7 +920,7 @@ def test_db_connection():
         result = cur.fetchone()
         con.close()
         return result is not None
-    except Exception as e:
+    except Exception:
         return False 
 
 
@@ -955,7 +956,7 @@ def insert_grorders_mos(name: str) -> GrordersMos:
     except Exception as e:
         try:
             con.rollback()
-        except:
+        except Exception:
             pass
         if ENABLE_LOGGING:
             print(f"Ошибка вставки в GRORDERS_MOS: {e}")
@@ -1056,7 +1057,7 @@ def insert_optimized_mos(
     except Exception as e:
         try:
             con.rollback()
-        except:
+        except Exception:
             pass
         if ENABLE_LOGGING:
             print(f"Ошибка вставки в OPTIMIZED_MOS: {e}")
@@ -1171,7 +1172,7 @@ def insert_optdetail_mos(
     except Exception as e:
         try:
             con.rollback()
-        except:
+        except Exception:
             pass
         if ENABLE_LOGGING:
             print(f"Ошибка вставки в OPTDETAIL_MOS: {e}")
@@ -1196,7 +1197,7 @@ def delete_grorders_mos(grorders_mos_id: int) -> bool:
     except Exception as e:
         try:
             con.rollback()
-        except:
+        except Exception:
             pass
         if ENABLE_LOGGING:
             print(f"Ошибка удаления из GRORDERS_MOS: {e}")
@@ -1240,7 +1241,7 @@ def delete_optimized_mos_by_grorders_mos_id(grorders_mos_id: int) -> bool:
     except Exception as e:
         try:
             con.rollback()
-        except:
+        except Exception:
             pass
         if ENABLE_LOGGING:
             print(f"Ошибка удаления из OPTIMIZED_MOS по GRORDER_MOS_ID={grorders_mos_id}: {e}")
@@ -1626,7 +1627,7 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
             if 'con' in locals() and not con.closed:
                 con.rollback()
                 con.close()
-        except:
+        except Exception:
             pass
             
         return {
@@ -1872,3 +1873,340 @@ def distribute_cell_numbers(grorder_mos_id: int) -> Dict[str, Any]:
                 "total_time": round(total_time, 2)
             }
         }
+
+# ========================================
+# НОВЫЕ МЕТОДЫ ДЛЯ ФИБЕРГЛАССА
+# ========================================
+
+def get_fiberglass_details_by_grorder_mos_id(grorder_mos_id: int) -> List[FiberglassDetail]:
+    """
+    Получить детали фибергласса по grorder_mos_id
+    Адаптировано на основе запросов профилей с учетом плоскостного материала (фибергласс)
+    """
+    details = []
+
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        # SQL запрос адаптированный из запросов профилей для фибергласса
+        # Используем фильтр gg.ggtypeid = 58 для типа материала "фибергласс"
+        sql = f"""
+        SELECT
+            gr.ordernames as gr_ordernames,
+            gr.groupdate as groupdate,
+            gr.name as gr_name,
+            oi.orderitemsid,
+            oi.name as oi_name,
+            o.orderno,
+            g.marking as g_marking,
+            g.goodsid,
+            grd.qty * itd.qty as total_qty,
+            itd.width as detail_width,
+            itd.height as detail_height,
+            itd.thick,
+            o.orderid,
+            itd.itemsdetailid,
+            od.modelno,
+            od.partside,
+            od.izdpart
+        FROM grorders gr
+        JOIN grorder_uf_values guv ON gr.grorderid = guv.grorderid
+        JOIN grordersdetail grd ON grd.grorderid = gr.grorderid
+        JOIN orderitems oi ON oi.orderitemsid = grd.orderitemsid
+        JOIN orders o ON o.orderid = oi.orderid
+        JOIN itemsdetail itd ON itd.orderitemsid = oi.orderitemsid
+        JOIN goods g ON g.goodsid = itd.goodsid
+        JOIN groupgoods gg ON gg.grgoodsid = itd.grgoodsid
+        JOIN groupgoodstypes ggt ON ggt.ggtypeid = gg.ggtypeid
+        LEFT JOIN optdetail_mos od ON oi.orderid = od.orderid AND itd.itemsdetailid = od.itemsdetailid
+        WHERE guv.userfieldid = 8
+        AND guv.var_str = '{grorder_mos_id}'
+        AND gg.ggtypeid = 58
+        ORDER BY oi.orderitemsid
+        """
+
+        if ENABLE_LOGGING:
+            print(f"🔍 DB: Выполняем запрос для grorder_mos_id={grorder_mos_id}")
+            print(f"🔍 DB: SQL: {sql}")
+
+        cur.execute(sql)
+        rows = cur.fetchall()
+
+        for row in rows:
+            detail = FiberglassDetail(
+                grorder_mos_id=grorder_mos_id,
+                orderid=int(row[12]) if row[12] else 0,  # o.orderid
+                orderitemsid=int(row[3]) if row[3] else 0,  # oi.orderitemsid
+                itemsdetailid=int(row[13]) if row[13] else 0,  # itd.itemsdetailid
+                item_name=str(row[4]) if row[4] else "",  # oi.name
+                width=float(row[9]) if row[9] else 0.0,  # itd.width
+                height=float(row[10]) if row[10] else 0.0,  # itd.height
+                quantity=int(row[8]) if row[8] else 0,  # total_qty
+                modelno=int(row[14]) if row[14] else None,  # od.modelno
+                partside=str(row[15]) if row[15] else None,  # od.partside
+                izdpart=str(row[16]) if row[16] else None,  # od.izdpart
+                goodsid=int(row[7]) if row[7] else 0,  # g.goodsid
+                marking=str(row[6]) if row[6] else ""  # g.marking
+            )
+            details.append(detail)
+
+            if ENABLE_LOGGING:
+                print(f"🔍 DB: Загружена деталь фибергласса: {detail.marking}, размер {detail.width}x{detail.height}мм, кол-во {detail.quantity}")
+
+        con.close()
+
+    except Exception as e:
+        if ENABLE_LOGGING:
+            print(f"❌ Ошибка получения деталей фибергласса: {e}")
+        raise
+
+    if ENABLE_LOGGING:
+        print(f"✅ Получено {len(details)} деталей фибергласса для grorder_mos_id={grorder_mos_id}")
+
+    return details
+
+def get_fiberglass_warehouse_materials(goodsids: List[int]) -> List[FiberglassSheet]:
+    """
+    Получить цельные рулоны фибергласса со склада
+    Количество рулонов рассчитывается как: общее_количество / (ширина * высота)
+    Адаптировано на основе запросов профилей для плоскостного материала
+    """
+    materials = []
+
+    if not goodsids:
+        if ENABLE_LOGGING:
+            print("⚠️ DB: goodsids пустой, пропускаем запрос материалов")
+        return materials
+
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        # Создаем строку для IN условия
+        placeholders = ','.join(['?'] * len(goodsids))
+
+        # SQL запрос для получения цельных рулонов фибергласса
+        sql = f"""
+        SELECT
+            g.marking as g_marking,
+            g.goodsid,
+            gg.width,
+            gg.height,
+            wh.qty - wh.reserveqty as available_qty,
+            m.amfactor
+        FROM goods g
+        JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid
+        JOIN grgoodsmeasure ggm ON ggm.grgoodsid = gg.grgoodsid
+        JOIN measure m ON m.measureid = ggm.measureid
+        JOIN groupgoodstypes ggt ON ggt.ggtypeid = gg.ggtypeid
+        LEFT JOIN warehouse wh ON wh.goodsid = g.goodsid
+        WHERE g.goodsid IN ({placeholders})
+        AND ggm.ismain = 1
+        AND gg.ggtypeid = 58
+        AND gg.width > 0
+        AND gg.height > 0
+        AND (wh.qty - wh.reserveqty) > 0
+        ORDER BY g.marking
+        """
+
+        if ENABLE_LOGGING:
+            print(f"🔍 DB: Выполняем запрос материалов для goodsids={goodsids}")
+            print(f"🔍 DB: SQL: {sql}")
+            print(f"🔍 DB: Параметры: {goodsids}")
+
+        cur.execute(sql, goodsids)
+        rows = cur.fetchall()
+
+        if ENABLE_LOGGING:
+            print(f"🔍 DB: Запрос материалов вернул {len(rows)} строк")
+            for i, row in enumerate(rows):
+                print(f"   Строка {i+1}: goodsid={row[1]}, marking={row[0]}, width={row[2]}, height={row[3]}, qty={row[4]}")
+
+        for row in rows:
+            # Расчет количества рулонов
+            available_qty = int(row[4]) if row[4] else 0
+            width = float(row[2]) if row[2] else 0.0
+            height = float(row[3]) if row[3] else 0.0
+            amfactor = float(row[5]) if row[5] else 1.0
+
+            # Количество целых рулонов: общее количество / (ширина * высота одного рулона)
+            if width > 0 and height > 0:
+                roll_area = width * height  # площадь одного рулона
+                roll_count = int(available_qty / roll_area) if roll_area > 0 else 0
+
+                if ENABLE_LOGGING:
+                    print(f"   Расчет рулонов: {available_qty} / ({width} * {height}) = {available_qty} / {roll_area} = {roll_count} рулонов")
+            else:
+                roll_count = 0
+                if ENABLE_LOGGING:
+                    print(f"   Пропуск: нулевые размеры width={width}, height={height}")
+
+            if roll_count > 0:
+                material = FiberglassSheet(
+                    goodsid=int(row[1]) if row[1] else 0,
+                    marking=str(row[0]) if row[0] else "",
+                    width=width,
+                    height=height,
+                    is_remainder=False,
+                    remainder_id=None,
+                    quantity=roll_count,
+                    area_mm2=width * height
+                )
+                materials.append(material)
+
+                if ENABLE_LOGGING:
+                    print(f"🔍 DB: Загружен цельный рулон: {material.marking}, {material.width}x{material.height}мм, кол-во {material.quantity} рулонов")
+            else:
+                if ENABLE_LOGGING:
+                    roll_area = width * height if width > 0 and height > 0 else 0
+                    print(f"   Пропуск материала: {row[0]}, roll_count = {roll_count} (available_qty={available_qty}, roll_area={roll_area})")
+
+        con.close()
+
+    except Exception as e:
+        if ENABLE_LOGGING:
+            print(f"❌ Ошибка получения материалов фибергласса: {e}")
+        raise
+
+    if ENABLE_LOGGING:
+        print(f"✅ Получено {len(materials)} цельных рулонов фибергласса")
+
+    return materials
+
+def get_fiberglass_warehouse_remainders(goodsids: List[int]) -> List[FiberglassSheet]:
+    """
+    Получить деловые остатки фибергласса со склада
+    Адаптировано на основе запросов профилей для плоскостного материала
+    """
+    remainders = []
+
+    if not goodsids:
+        if ENABLE_LOGGING:
+            print("⚠️ DB: goodsids пустой, пропускаем запрос остатков")
+        return remainders
+
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        # Создаем строку для IN условия
+        placeholders = ','.join(['?'] * len(goodsids))
+
+        # SQL запрос для получения деловых остатков фибергласса
+        sql = f"""
+        SELECT
+            g.marking as g_marking,
+            whm.goodsid,
+            whm.width,
+            whm.height,
+            whm.qty - whm.reserveqty as qty,
+            whm.whremainderid,
+            (whm.width * whm.height) as area_mm2
+        FROM warehouseremainder whm
+        JOIN goods g ON g.goodsid = whm.goodsid
+        JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid
+        JOIN groupgoodstypes ggt ON ggt.ggtypeid = gg.ggtypeid
+        WHERE whm.goodsid IN ({placeholders})
+        AND gg.ggtypeid = 58
+        AND (whm.qty - whm.reserveqty) > 0
+        ORDER BY area_mm2 DESC
+        """
+
+        if ENABLE_LOGGING:
+            print(f"🔍 DB: Выполняем запрос остатков для goodsids={goodsids}")
+            print(f"🔍 DB: SQL: {sql}")
+            print(f"🔍 DB: Параметры: {goodsids}")
+
+        cur.execute(sql, goodsids)
+        rows = cur.fetchall()
+
+        if ENABLE_LOGGING:
+            print(f"🔍 DB: Запрос остатков вернул {len(rows)} строк")
+            for i, row in enumerate(rows):
+                print(f"   Строка {i+1}: goodsid={row[1]}, marking={row[0]}, width={row[2]}, height={row[3]}, qty={row[4]}")
+
+        for row in rows:
+            remainder = FiberglassSheet(
+                goodsid=int(row[1]) if row[1] else 0,
+                marking=str(row[0]) if row[0] else "",
+                width=float(row[2]) if row[2] else 0.0,
+                height=float(row[3]) if row[3] else 0.0,
+                is_remainder=True,
+                remainder_id=int(row[5]) if row[5] else None,
+                quantity=int(row[4]) if row[4] else 1,
+                area_mm2=float(row[6]) if row[6] else 0.0
+            )
+            remainders.append(remainder)
+
+            if ENABLE_LOGGING:
+                print(f"🔍 DB: Загружен деловой остаток: {remainder.marking}, {remainder.width}x{remainder.height}мм, площадь {remainder.area_mm2:.0f}мм²")
+
+        con.close()
+
+    except Exception as e:
+        if ENABLE_LOGGING:
+            print(f"❌ Ошибка получения остатков фибергласса: {e}")
+        raise
+
+    if ENABLE_LOGGING:
+        print(f"✅ Получено {len(remainders)} деловых остатков фибергласса")
+
+    return remainders
+
+def load_fiberglass_data(grorder_mos_id: int) -> FiberglassLoadDataResponse:
+    """
+    Загрузить все данные фибергласса по grorder_mos_id
+    Объединяет детали, материалы и остатки в один метод
+    """
+    try:
+        if ENABLE_LOGGING:
+            print(f"🔄 Загрузка данных фибергласса для grorder_mos_id={grorder_mos_id}")
+
+        # 1. Загружаем детали фибергласса
+        details = get_fiberglass_details_by_grorder_mos_id(grorder_mos_id)
+
+        if not details:
+            if ENABLE_LOGGING:
+                print(f"⚠️ Не найдено деталей фибергласса для grorder_mos_id={grorder_mos_id}")
+            return FiberglassLoadDataResponse(
+                details=[],
+                materials=[],
+                remainders=[],
+                total_details=0,
+                total_materials=0,
+                total_remainders=0
+            )
+
+        # 2. Получаем уникальные goodsid для загрузки материалов
+        goodsids = list(set(detail.goodsid for detail in details if detail.goodsid))
+
+        if ENABLE_LOGGING:
+            print(f"🔧 Найдено {len(goodsids)} уникальных артикулов для загрузки материалов: {goodsids}")
+
+        # 3. Загружаем материалы и остатки
+        materials = get_fiberglass_warehouse_materials(goodsids)
+        remainders = get_fiberglass_warehouse_remainders(goodsids)
+
+        response = FiberglassLoadDataResponse(
+            details=details,
+            materials=materials,
+            remainders=remainders,
+            total_details=len(details),
+            total_materials=len(materials),
+            total_remainders=len(remainders)
+        )
+
+        if ENABLE_LOGGING:
+            print(f"✅ Данные фибергласса загружены:")
+            print(f"   - Деталей: {response.total_details}")
+            print(f"   - Цельных рулонов: {response.total_materials}")
+            print(f"   - Деловых остатков: {response.total_remainders}")
+
+        return response
+
+    except Exception as e:
+        if ENABLE_LOGGING:
+            print(f"❌ Ошибка загрузки данных фибергласса: {e}")
+        raise
+

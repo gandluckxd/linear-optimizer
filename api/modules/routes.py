@@ -13,6 +13,10 @@ from modules.models import (
     OptDetailMosCreate, OptDetailMos,
     GrordersByMosIdRequest
 )
+from modules.models import (
+    FiberglassDetailRequest, FiberglassMaterialsRequest,
+    FiberglassDetail, FiberglassSheet, FiberglassLoadDataResponse
+)
 from utils.db_functions import (
     get_profiles_for_order,
     get_stock_for_profile,
@@ -28,6 +32,12 @@ from utils.db_functions import (
     delete_grorders_mos,
     delete_optimized_mos_by_grorders_mos_id,
     distribute_cell_numbers
+)
+from utils.db_functions import (
+    load_fiberglass_data,
+    get_fiberglass_details_by_grorder_mos_id,
+    get_fiberglass_warehouse_materials,
+    get_fiberglass_warehouse_remainders
 )
 
 router = APIRouter()
@@ -468,4 +478,65 @@ async def test_connection():
             "database": "Altawin"
         }
     except Exception as e:
-        return {"status": "error", "detail": str(e)} 
+        return {"status": "error", "detail": str(e)}
+
+
+# ========================================
+# ЭНДПОИНТЫ ДЛЯ ФИБЕРГЛАССА
+# ========================================
+
+@router.post("/fiberglass/load-data", response_model=FiberglassLoadDataResponse)
+async def load_fiberglass_data_endpoint(request: FiberglassDetailRequest):
+    """
+    Загрузить все данные фибергласса по grorder_mos_id
+    (детали, материалы, остатки)
+    """
+    try:
+        print(f"🔄 API: Загрузка данных фибергласса для grorder_mos_id={request.grorder_mos_id}")
+        
+        data = load_fiberglass_data(request.grorder_mos_id)
+        
+        print(f"✅ API: Данные фибергласса загружены:")
+        print(f"   - Деталей: {data.total_details}")
+        print(f"   - Цельных рулонов: {data.total_materials}")
+        print(f"   - Деловых остатков: {data.total_remainders}")
+        
+        return data
+        
+    except Exception as e:
+        print(f"❌ API: Ошибка загрузки данных фибергласса: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка загрузки данных фибергласса: {str(e)}")
+
+@router.post("/fiberglass/get-details", response_model=List[FiberglassDetail])
+async def get_fiberglass_details_endpoint(request: FiberglassDetailRequest):
+    """
+    Получить детали фибергласса для раскроя по grorder_mos_id
+    """
+    try:
+        details = get_fiberglass_details_by_grorder_mos_id(request.grorder_mos_id)
+        return details
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка получения деталей фибергласса: {str(e)}")
+
+@router.post("/fiberglass/get-materials", response_model=List[FiberglassSheet])
+async def get_fiberglass_materials_endpoint(request: FiberglassMaterialsRequest):
+    """
+    Получить материалы фибергласса со склада
+    """
+    try:
+        materials = get_fiberglass_warehouse_materials(request.goodsids)
+        return materials
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка получения материалов фибергласса: {str(e)}")
+
+@router.post("/fiberglass/get-remainders", response_model=List[FiberglassSheet])
+async def get_fiberglass_remainders_endpoint(request: FiberglassMaterialsRequest):
+    """
+    Получить деловые остатки фибергласса
+    """
+    try:
+        remainders = get_fiberglass_warehouse_remainders(request.goodsids)
+        return remainders
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка получения остатков фибергласса: {str(e)}")
+

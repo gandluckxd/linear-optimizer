@@ -125,6 +125,24 @@ def fill_profiles_table(table: QTableWidget, profiles: list):
     table.resizeColumnsToContents()
 
 
+def fill_fabric_details_table(table: QTableWidget, fabric_details: list):
+    """Заполнение таблицы деталей полотен"""
+    table.setRowCount(0)
+
+    for detail in fabric_details:
+        row = table.rowCount()
+        table.insertRow(row)
+
+        table.setItem(row, 0, _create_text_item(detail.get('item_name', '')))
+        table.setItem(row, 1, _create_text_item(detail.get('marking', '')))
+        table.setItem(row, 2, _create_numeric_item(detail.get('width', 0)))
+        table.setItem(row, 3, _create_numeric_item(detail.get('height', 0)))
+        table.setItem(row, 4, _create_numeric_item(detail.get('quantity', 0)))
+
+    # Обновляем размеры столбцов
+    table.resizeColumnsToContents()
+
+
 def fill_stock_remainders_table(table: QTableWidget, remainders: list):
     """Заполнение таблицы остатков со склада"""
     table.setRowCount(0)
@@ -140,18 +158,50 @@ def fill_stock_remainders_table(table: QTableWidget, remainders: list):
     # Обновляем размеры столбцов
     table.resizeColumnsToContents()
 
-def fill_stock_materials_table(table: QTableWidget, materials: list):
-    """Заполнение таблицы материалов со склада"""
+def fill_fabric_remainders_table(table: QTableWidget, remainders: list):
+    """Заполнение таблицы остатков полотен со склада"""
     table.setRowCount(0)
-    
+
+    for remainder in remainders:
+        row = table.rowCount()
+        table.insertRow(row)
+
+        table.setItem(row, 0, _create_text_item(remainder.get('marking', '')))
+        table.setItem(row, 1, _create_numeric_item(remainder.get('width', 0)))
+        table.setItem(row, 2, _create_numeric_item(remainder.get('height', 0)))
+        table.setItem(row, 3, _create_numeric_item(remainder.get('quantity', 0)))
+
+    # Обновляем размеры столбцов
+    table.resizeColumnsToContents()
+
+def fill_fabric_materials_table(table: QTableWidget, materials: list):
+    """Заполнение таблицы материалов полотен со склада"""
+    table.setRowCount(0)
+
     for material in materials:
         row = table.rowCount()
         table.insertRow(row)
-        
+
+        table.setItem(row, 0, _create_text_item(material.get('marking', '')))
+        table.setItem(row, 1, _create_numeric_item(material.get('width', 0)))
+        table.setItem(row, 2, _create_numeric_item(material.get('height', 0)))
+        table.setItem(row, 3, _create_numeric_item(material.get('quantity', 0)))
+
+    # Обновляем размеры столбцов
+    table.resizeColumnsToContents()
+
+def fill_stock_materials_table(table: QTableWidget, materials: list):
+    """Заполнение таблицы материалов со склада"""
+    table.setRowCount(0)
+
+    for material in materials:
+        row = table.rowCount()
+        table.insertRow(row)
+
         table.setItem(row, 0, _create_text_item(material.get('profile_code', '')))
         table.setItem(row, 1, _create_numeric_item(material.get('length', 0)))
         table.setItem(row, 2, _create_numeric_item(material.get('quantity_pieces', 0)))
-    
+
     # Обновляем размеры столбцов
     table.resizeColumnsToContents()
 

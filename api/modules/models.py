@@ -277,3 +277,74 @@ class OptDetailMos(BaseModel):
     handlepos: Optional[float] = None
     handleposfalts: Optional[float] = None
     flugelopentag: Optional[str] = None
+
+# ========================================
+# МОДЕЛИ ДЛЯ ФИБЕРГЛАССА
+# ========================================
+
+class FiberglassDetailRequest(BaseModel):
+    """Запрос на получение деталей фибергласса"""
+    grorder_mos_id: int
+
+class FiberglassMaterialsRequest(BaseModel):
+    """Запрос на получение материалов фибергласса со склада"""
+    goodsids: List[int]
+
+class FiberglassDetail(BaseModel):
+    """Деталь фибергласса для раскроя"""
+    grorder_mos_id: int
+    orderid: int
+    orderitemsid: int
+    itemsdetailid: int
+    item_name: str  # Название изделия (01, 02, 03...)
+    width: float    # Ширина детали в мм
+    height: float   # Высота детали в мм
+    quantity: int   # Количество деталей
+    modelno: Optional[int] = None
+    partside: Optional[str] = None
+    izdpart: Optional[str] = None
+    goodsid: int    # ID материала
+    marking: str    # Артикул материала
+
+class FiberglassSheet(BaseModel):
+    """Лист/рулон фибергласса"""
+    goodsid: int
+    marking: str    # Артикул материала
+    width: float    # Ширина рулона
+    height: float   # Длина рулона 
+    is_remainder: bool = False
+    remainder_id: Optional[int] = None  # whremainderid для остатков
+    quantity: int = 1
+    area_mm2: Optional[float] = None  # Площадь для сортировки остатков
+
+class FiberglassOptimizationSettings(BaseModel):
+    """Настройки оптимизации фибергласса"""
+    sheet_margin_top: float = 15.0
+    sheet_margin_bottom: float = 15.0
+    sheet_margin_left: float = 15.0
+    sheet_margin_right: float = 15.0
+    remainder_margin_top: float = 15.0
+    remainder_margin_bottom: float = 15.0
+    remainder_margin_left: float = 15.0
+    remainder_margin_right: float = 15.0
+    blade_width: float = 1.0
+    max_waste_percent: float = 5.0
+    min_remainder_width: float = 500.0
+    min_remainder_height: float = 500.0
+    use_simplified_optimization: bool = True
+
+class FiberglassOptimizeRequest(BaseModel):
+    """Запрос на оптимизацию фибергласса"""
+    grorder_mos_id: int
+    details: List[FiberglassDetail]
+    sheets: List[FiberglassSheet]
+    settings: FiberglassOptimizationSettings
+
+class FiberglassLoadDataResponse(BaseModel):
+    """Ответ с загруженными данными фибергласса"""
+    details: List[FiberglassDetail]
+    materials: List[FiberglassSheet]  # Цельные рулоны
+    remainders: List[FiberglassSheet]  # Деловые остатки
+    total_details: int
+    total_materials: int
+    total_remainders: int

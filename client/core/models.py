@@ -201,4 +201,43 @@ class Order:
     customer: str
     date: datetime
     status: str = "new"
-    profiles: List[Profile] = field(default_factory=list) 
+    profiles: List[Profile] = field(default_factory=list)
+
+@dataclass
+class FiberglassDetail:
+    """Деталь фибергласса для раскроя"""
+    grorder_mos_id: int
+    orderid: int
+    orderitemsid: int
+    itemsdetailid: int
+    item_name: str  # Название изделия (01, 02, 03...)
+    width: float    # Ширина детали в мм
+    height: float   # Высота детали в мм
+    quantity: int   # Количество деталей
+    goodsid: int    # ID материала
+    marking: str    # Артикул материала
+    modelno: Optional[int] = None
+    partside: Optional[str] = None
+    izdpart: Optional[str] = None
+
+@dataclass
+class FiberglassSheet:
+    """Лист/рулон фибергласса"""
+    goodsid: int
+    marking: str    # Артикул материала
+    width: float    # Ширина рулона
+    height: float   # Длина рулона
+    is_remainder: bool = False
+    remainder_id: Optional[int] = None  # whremainderid для остатков
+    quantity: int = 1
+    area_mm2: Optional[float] = None  # Площадь для сортировки остатков
+
+@dataclass
+class FiberglassLoadDataResponse:
+    """Ответ с загруженными данными фибергласса"""
+    details: List[FiberglassDetail]
+    materials: List[FiberglassSheet]  # Цельные рулоны
+    remainders: List[FiberglassSheet]  # Деловые остатки
+    total_details: int
+    total_materials: int
+    total_remainders: int
