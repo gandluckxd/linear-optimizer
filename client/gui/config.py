@@ -479,10 +479,18 @@ WIDGET_CONFIGS = {
     }
 }
 
+# Настройки визуализации
+VISUALIZATION_DEFAULTS = {
+    'zoom_min': 10,
+    'zoom_max': 500,
+    'zoom_default': 100,
+    'grid_size': 50
+}
+
 # Цветовая схема
 COLORS = {
     "primary": "#0078d4",
-    "primary_hover": "#106ebe", 
+    "primary_hover": "#106ebe",
     "primary_pressed": "#005a9e",
     "success": "#28a745",
     "success_hover": "#218838",
@@ -497,5 +505,17 @@ COLORS = {
     "text_disabled": "#888888",
     "accent_green": "#4ecdc4",
     "accent_red": "#ff6b6b",
-    "accent_yellow": "#00ff00"
+    "accent_yellow": "#00ff00",
+
+    # Цвета для визуализации раскроя
+    'sheet_border': '#ffffff',
+    'sheet_fill': '#2A2A2A',
+    'detail_fill': '#4CAF50',
+    'detail_border': '#2E7D32',
+    'remainder_fill': '#FF9800',
+    'remainder_border': '#F57C00',
+    'waste_fill': '#f44336',
+    'waste_border': '#d32f2f',
+    'grid': '#444444',
+    'text': '#ffffff'
 }

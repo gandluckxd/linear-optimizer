@@ -5,6 +5,63 @@
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 from datetime import datetime
+from enum import Enum
+
+class RotationMode(Enum):
+    """Режимы поворота деталей"""
+    NONE = "none"           # Без поворота
+    ALLOW_90 = "allow_90"   # Разрешить поворот на 90°
+    OPTIMAL = "optimal"     # Автоматический выбор наилучшего поворота
+
+@dataclass
+class PlacedFiberglassItem:
+    """Размещенный элемент на рулоне"""
+    x: float
+    y: float
+    width: float
+    height: float
+    item_type: str  # "detail", "remainder", "waste"
+    detail: Optional['FiberglassDetail'] = None
+    is_rotated: bool = False
+
+    def __post_init__(self):
+        self.x2 = self.x + self.width
+        self.y2 = self.y + self.height
+        self.area = self.width * self.height
+
+@dataclass
+class FiberglassRollLayout:
+    """Раскладка одного рулона фибергласса"""
+    roll: 'FiberglassRoll'
+    placed_items: List[PlacedFiberglassItem] = field(default_factory=list)
+    waste_percent: float = 0.0
+    used_length: float = 0.0
+
+    def get_remnants(self) -> List[PlacedFiberglassItem]:
+        """Получить все деловые остатки на рулоне"""
+        return [item for item in self.placed_items if item.item_type == "remainder"]
+
+    def get_waste(self) -> List[PlacedFiberglassItem]:
+        """Получить все отходы на рулоне"""
+        return [item for item in self.placed_items if item.item_type == "waste"]
+
+@dataclass
+class FiberglassOptimizationResult:
+    """Результат оптимизации фибергласса"""
+    success: bool
+    layouts: List['FiberglassRollLayout']
+    unplaced_details: List['FiberglassDetail']
+    total_efficiency: float
+    total_waste_percent: float
+    total_cost: float
+    useful_remnants: List[PlacedFiberglassItem]
+    optimization_time: float
+    message: str = ""
+
+    def __post_init__(self):
+        self.total_rolls = len(self.layouts)
+        self.total_placed_details = sum(len(layout.placed_items) for layout in self.layouts
+                                       if layout.placed_items and layout.placed_items[0].item_type == "detail")
 
 @dataclass
 class Piece:
@@ -220,6 +277,10 @@ class FiberglassDetail:
     partside: Optional[str] = None
     izdpart: Optional[str] = None
 
+    def __post_init__(self):
+        # Вычисляем площадь для сортировки по размеру
+        self.area = self.width * self.height
+
 @dataclass
 class FiberglassSheet:
     """Лист/рулон фибергласса"""
@@ -231,6 +292,42 @@ class FiberglassSheet:
     remainder_id: Optional[int] = None  # whremainderid для остатков
     quantity: int = 1
     area_mm2: Optional[float] = None  # Площадь для сортировки остатков
+
+@dataclass
+class FiberglassRoll:
+    """Рулон фибергласса"""
+    id: str
+    width: float    # Ширина рулона
+    length: float   # Длина рулона (обычно 30000мм = 30м)
+    material: str
+    cost_per_unit: float = 0.0
+    is_remainder: bool = False
+    remainder_id: Optional[str] = None
+
+    def __post_init__(self):
+        self.area = self.width * self.length
+
+@dataclass
+class FiberglassOptimizationParams:
+    """Параметры оптимизации фибергласса"""
+    min_remainder_width: float = 500.0
+    min_remainder_length: float = 1000.0
+    target_waste_percent: float = 5.0
+    remainder_waste_percent: float = 20.0
+    min_waste_side: float = 50.0
+    use_warehouse_remnants: bool = True
+    rotation_mode: RotationMode = RotationMode.ALLOW_90
+    force_adjacent_placement: bool = True
+    max_iterations_per_roll: int = 5
+    cutting_width: float = 0.0
+
+    # Новые параметры плоскостной оптимизации из интерфейса
+    planar_min_remainder_width: float = 500.0    # Минимальная ширина для деловых остатков (мм)
+    planar_min_remainder_height: float = 500.0   # Минимальная высота для деловых остатков (мм)
+    planar_cut_width: float = 1.0                # Ширина реза для плоскостной оптимизации (мм)
+    sheet_indent: float = 15.0                   # Отступы для листа со всех сторон (мм)
+    remainder_indent: float = 15.0               # Отступы для делового остатка со всех сторон (мм)
+    planar_max_waste_percent: float = 5.0        # Максимальная процент отхода для плоскостной оптимизации (%)
 
 @dataclass
 class FiberglassLoadDataResponse:

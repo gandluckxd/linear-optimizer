@@ -26,6 +26,14 @@ class OptimizationSettings:
     end_indent: float = 10.0              # Отступ от конца (мм)
     min_trash_mm: float = 50.0            # Минимальный отход (мм)
 
+    # Параметры плоскостной оптимизации
+    min_remainder_width: float = 500.0    # Минимальная ширина для деловых остатков (мм)
+    min_remainder_height: float = 500.0   # Минимальная высота для деловых остатков (мм)
+    planar_cut_width: float = 1.0         # Ширина реза для плоскостной оптимизации (мм)
+    sheet_indent: float = 15.0            # Отступы для листа со всех сторон (мм)
+    remainder_indent: float = 15.0        # Отступы для делового остатка со всех сторон (мм)
+    planar_max_waste_percent: float = 5.0 # Максимальная процент отхода для плоскостной оптимизации (%)
+
 
 class SimpleOptimizer:
     """

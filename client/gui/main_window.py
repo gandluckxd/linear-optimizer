@@ -1,3 +1,4 @@
+
 """
 Главное окно Linear Optimizer
 Профессиональная система оптимизации линейного распила
@@ -5,15 +6,15 @@
 """
 
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget, 
-    QTableWidget, QTableWidgetItem, QCheckBox, QSpinBox, QGroupBox, 
-    QPushButton, QFormLayout, QLineEdit, 
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QListWidget,
+    QTableWidget, QTableWidgetItem, QCheckBox, QSpinBox, QGroupBox,
+    QPushButton, QFormLayout, QLineEdit,
     QTabWidget, QComboBox, QDialog, QProgressBar, QMessageBox, QHeaderView,
     QSplitter, QFrame, QTextEdit, QSlider, QMainWindow, QMenuBar, QStatusBar,
-    QAction, QApplication
+    QAction, QApplication, QFileDialog, QScrollArea, QGraphicsScene, QGraphicsView
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
-from PyQt5.QtGui import QFont, QIcon, QShowEvent
+from PyQt5.QtGui import QFont, QIcon, QShowEvent, QPixmap, QPainter
 import sys
 # import threading  # Убрали - теперь используем QThread
 from datetime import datetime
@@ -23,9 +24,12 @@ import os
 import json
 import logging
 
+
 # Импорты для модульной архитектуры
 from core.api_client import get_api_client
 from core.optimizer import LinearOptimizer, CuttingStockOptimizer, OptimizationSettings, SolverType
+from core.fiberglass_optimizer import optimize as optimize_fiberglass
+
 from core.models import Profile, Stock, OptimizationResult, StockRemainder, StockMaterial, FiberglassDetail, FiberglassSheet
 from .table_widgets import (
     _create_text_item, _create_numeric_item, setup_table_columns,
@@ -36,7 +40,9 @@ from .table_widgets import (
     copy_table_to_clipboard, copy_table_as_csv
 )
 from .dialogs import DebugDialog, ProgressDialog, OptimizationSettingsDialog, ApiSettingsDialog
+
 from .config import MAIN_WINDOW_STYLE, TAB_STYLE, SPECIAL_BUTTON_STYLES, WIDGET_CONFIGS, COLORS
+from .visualization_tab import VisualizationTab
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -114,6 +120,11 @@ class DataLoadThread(QThread):
                     # Загружаем детали полотен
                     self.debug_step.emit(f"📋 Загрузка деталей полотен для grorders_mos_id={grorders_mos_id}...")
                     fabric_details = self.api_client.get_fiberglass_details(grorders_mos_id)
+                    print(f"🔧 DEBUG: API вернул {len(fabric_details)} деталей полотен")
+                    print(f"🔧 DEBUG: fabric_details тип: {type(fabric_details)}")
+                    if fabric_details and len(fabric_details) > 0:
+                        print(f"🔧 DEBUG: Первая деталь: {fabric_details[0]}")
+                        print(f"🔧 DEBUG: Первая деталь атрибуты: {dir(fabric_details[0])}")
                     self.debug_step.emit(f"✅ Загружено {len(fabric_details)} деталей полотен")
 
                     if fabric_details:
@@ -148,7 +159,7 @@ class DataLoadThread(QThread):
                         if fabric_materials:
                             self.debug_step.emit("📋 Детали загруженных материалов полотен:")
                             for material in fabric_materials:
-                                self.debug_step.emit(f"  - {material.profile_code}: {material.quantity_pieces} полотен {material.width}мм x {material.height}мм")
+                                self.debug_step.emit(f"  - {getattr(material, 'marking', 'неизвестно')}: {getattr(material, 'quantity', 1)} полотен {getattr(material, 'width', 0)}мм x {getattr(material, 'height', 0)}мм")
                         else:
                             self.debug_step.emit("⚠️ ВНИМАНИЕ: Не загружен ни один материал полотен!")
                     else:
@@ -259,6 +270,9 @@ class LinearOptimizerWindow(QMainWindow):
     optimization_result_signal = pyqtSignal(object)  # OptimizationResult
     optimization_error_signal = pyqtSignal(str)
     close_progress_signal = pyqtSignal()
+
+    # Сигналы для обновления визуализации
+    update_visualization_signal = pyqtSignal(object)  # FiberglassOptimizationResult
     
     def __init__(self):
         super().__init__()
@@ -275,7 +289,11 @@ class LinearOptimizerWindow(QMainWindow):
         self.fabric_remainders = [] # Остатки полотен со склада
         self.fabric_materials = []  # Цельные материалы полотен со склада
         self.optimization_result = None
+        self.fabric_optimization_result = None  # Результаты оптимизации фибергласса
+
         self.current_settings = OptimizationSettings()
+
+
         
         # Инициализация параметров оптимизации (значения по умолчанию)
         self.optimization_params = {
@@ -286,7 +304,16 @@ class LinearOptimizerWindow(QMainWindow):
             'use_remainders': True,
             'min_trash_mm': 50,
             'begin_indent': 10,
-            'end_indent': 10
+            'end_indent': 10,
+            # Параметры фибергласса
+            'planar_min_remainder_width': 500.0,
+            'planar_min_remainder_height': 500.0,
+            'planar_cut_width': 1.0,
+            'sheet_indent': 15.0,
+            'remainder_indent': 15.0,
+            'planar_max_waste_percent': 5.0,
+            'use_warehouse_remnants': True,
+            'allow_rotation': True
         }
         
         # Инициализация диалогов
@@ -315,6 +342,9 @@ class LinearOptimizerWindow(QMainWindow):
         self.optimization_result_signal.connect(self._handle_optimization_result)
         self.optimization_error_signal.connect(self._handle_optimization_error)
         self.close_progress_signal.connect(self._close_progress_dialog)
+
+        # Сигналы для обновления визуализации
+        self.update_visualization_signal.connect(self._update_visualization_tab)
         
         print("🔧 DEBUG: Главное окно Linear Optimizer инициализировано")
 
@@ -390,7 +420,12 @@ class LinearOptimizerWindow(QMainWindow):
         
         # Вкладка 2: Результаты оптимизации
         self.create_results_tab()
-        
+
+        # Вкладка 3: Визуализация раскроя
+        self.create_visualization_tab()
+
+
+
         main_layout.addWidget(self.tabs)
         
         # Статус бар
@@ -416,15 +451,7 @@ class LinearOptimizerWindow(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        
-        # Меню Инструменты
-        tools_menu = menubar.addMenu("Инструменты")
-        
-        fiberglass_action = QAction("Оптимизация фибергласса", self)
-        fiberglass_action.setShortcut("Ctrl+F")
-        fiberglass_action.triggered.connect(self.open_fiberglass_optimizer)
-        tools_menu.addAction(fiberglass_action)
-        
+
         # Меню Параметры
         params_menu = menubar.addMenu("Параметры")
         
@@ -439,13 +466,6 @@ class LinearOptimizerWindow(QMainWindow):
         api_settings_action = QAction("Настройки API", self)
         api_settings_action.triggered.connect(self.show_api_settings)
         settings_menu.addAction(api_settings_action)
-        
-        # Меню Помощь
-        help_menu = menubar.addMenu("Помощь")
-        
-        about_action = QAction("О программе", self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
 
 
 
@@ -481,7 +501,7 @@ class LinearOptimizerWindow(QMainWindow):
         self.optimize_button.setEnabled(False)
         self.optimize_button.setStyleSheet(SPECIAL_BUTTON_STYLES["optimize"])
         buttons_layout.addWidget(self.optimize_button)
-        
+
         buttons_layout.addStretch()
         layout.addLayout(buttons_layout)
         
@@ -724,6 +744,17 @@ class LinearOptimizerWindow(QMainWindow):
         
         self.tabs.addTab(results_tab, "📈 Результаты оптимизации")
 
+
+
+
+
+    def create_visualization_tab(self):
+        """Создание вкладки визуализации"""
+        print("🔧 DEBUG: Создание вкладки визуализации")
+        self.visualization_tab = VisualizationTab()
+        self.tabs.addTab(self.visualization_tab, "👁️ Визуализация раскроя")
+        print(f"🔧 DEBUG: Вкладка визуализации создана: {self.visualization_tab}")
+
     def create_statistics_group(self):
         """Создание группы статистики"""
         group = QGroupBox("Общая информация о результатах оптимизации")
@@ -810,7 +841,9 @@ class LinearOptimizerWindow(QMainWindow):
         self.distribute_cells_button.clicked.connect(self.on_distribute_cells_clicked)
         self.distribute_cells_button.setEnabled(False)
         upload_layout.addWidget(self.distribute_cells_button)
-        
+
+
+
         upload_layout.addStretch()
         
         layout.addLayout(upload_layout)
@@ -872,6 +905,10 @@ class LinearOptimizerWindow(QMainWindow):
     
     def on_optimize_clicked(self):
         """Обработчик кнопки оптимизации"""
+        print("🔧 DEBUG: === НАЧАЛО ОПТИМИЗАЦИИ ===")
+        print(f"🔧 DEBUG: self.profiles: {len(self.profiles) if self.profiles else 0} элементов")
+        print(f"🔧 DEBUG: self.fabric_details: {len(self.fabric_details) if self.fabric_details else 0} элементов")
+
         # Проверяем данные
         if not self.profiles:
             QMessageBox.warning(self, "Предупреждение", "Сначала загрузите данные заказа")
@@ -887,6 +924,10 @@ class LinearOptimizerWindow(QMainWindow):
         self.optimize_button.setEnabled(False)
         self.optimize_button.setText("Оптимизация...")
         
+        # Очищаем вкладку визуализации перед запуском новой оптимизации
+        if hasattr(self, 'visualization_tab'):
+            self.visualization_tab.clear_visualization()
+
         # Показываем диалог прогресса
         self.progress_dialog = ProgressDialog(self)
         self.progress_dialog.show()
@@ -931,10 +972,162 @@ class LinearOptimizerWindow(QMainWindow):
         self.optimization_thread.progress_updated.connect(self._update_progress)
         self.optimization_thread.finished_optimization.connect(self._close_progress_dialog)
         
-        # Запускаем поток
+        # Запускаем поток оптимизации профилей
         self.optimization_thread.start()
 
+        # Запускаем оптимизацию фибергласса если есть данные
+        print(f"🔧 DEBUG: Проверка fabric_details: {self.fabric_details}")
+        if self.fabric_details:
+            print(f"🔧 DEBUG: Запуск оптимизации фибергласса с {len(self.fabric_details)} деталями")
+            self._run_fiberglass_optimization()
+        else:
+            print("🔧 DEBUG: fabric_details пустой, оптимизация фибергласса не запускается")
 
+    def _run_fiberglass_optimization(self):
+        """Запуск оптимизации фибергласса"""
+        print("🔧 DEBUG: === НАЧАЛО ОПТИМИЗАЦИИ ФИБЕРГЛАССА ===")
+        print(f"🔧 DEBUG: self.fabric_details: {self.fabric_details}")
+        print(f"🔧 DEBUG: len(self.fabric_details): {len(self.fabric_details) if self.fabric_details else 'N/A'}")
+        print(f"🔧 DEBUG: self.fabric_materials: {self.fabric_materials}")
+        print(f"🔧 DEBUG: self.fabric_remainders: {self.fabric_remainders}")
+
+        try:
+            # Подготавливаем данные для оптимизации фибергласса
+            print("🔧 DEBUG: Преобразование FiberglassDetail в словари")
+
+            # Преобразуем FiberglassDetail объекты в словари
+            details_dict = []
+            for detail in self.fabric_details:
+                detail_dict = {
+                    'orderitemsid': str(detail.orderitemsid),
+                    'width': detail.width,
+                    'height': detail.height,
+                    'g_marking': detail.marking,
+                    'total_qty': detail.quantity,
+                    'goodsid': detail.goodsid,
+                    'gp_marking': detail.marking,
+                    'oi_name': detail.item_name
+                }
+                details_dict.append(detail_dict)
+
+            # Преобразуем FiberglassSheet объекты в словари
+            materials_dict = []
+            for material in self.fabric_materials:
+                material_dict = {
+                    'id': str(material.goodsid),  # Используем goodsid как ID
+                    'width': material.width,
+                    'height': material.height,
+                    'g_marking': material.marking,
+                    'cost': 1500.0,  # Заглушка для стоимости
+                    'goodsid': material.goodsid,
+                    'quantity': material.quantity
+                }
+                materials_dict.append(material_dict)
+
+            remainders_dict = []
+            for remainder in self.fabric_remainders:
+                remainder_dict = {
+                    'id': str(remainder.remainder_id if remainder.remainder_id else remainder.goodsid),
+                    'width': remainder.width,
+                    'height': remainder.height,
+                    'g_marking': remainder.marking,
+                    'cost': 800.0,  # Заглушка для стоимости
+                    'goodsid': remainder.goodsid,
+                    'quantity': remainder.quantity
+                }
+                remainders_dict.append(remainder_dict)
+
+            fabric_params = {
+                'planar_min_remainder_width': self.optimization_params.get('planar_min_remainder_width', 500.0),
+                'planar_min_remainder_height': self.optimization_params.get('planar_min_remainder_height', 500.0),
+                'planar_cut_width': self.optimization_params.get('planar_cut_width', 1.0),
+                'sheet_indent': self.optimization_params.get('sheet_indent', 15.0),
+                'remainder_indent': self.optimization_params.get('remainder_indent', 15.0),
+                'planar_max_waste_percent': self.optimization_params.get('planar_max_waste_percent', 5.0),
+                'use_warehouse_remnants': self.optimization_params.get('use_warehouse_remnants', True),
+                'allow_rotation': self.optimization_params.get('allow_rotation', True)
+            }
+
+            # Запускаем оптимизацию фибергласса
+            def progress_callback(percent):
+                """Коллбэк для прогресса оптимизации фибергласса"""
+                self._add_debug_step_safe(f"Фибергласс: {percent:.1f}%")
+
+            self.debug_step_signal.emit("🪟 Запуск оптимизации фибергласса...")
+
+            print("🔧 DEBUG: Вызываем optimize_fiberglass с параметрами:")
+            print(f"  - details: {len(details_dict)} элементов")
+            print(f"  - materials: {len(materials_dict)} элементов")
+            print(f"  - remainders: {len(remainders_dict)} элементов")
+            print(f"  - params: {fabric_params}")
+
+            # Синхронный вызов оптимизации фибергласса
+            self.fabric_optimization_result = optimize_fiberglass(
+                details=details_dict,
+                materials=materials_dict,
+                remainders=remainders_dict,
+                params=fabric_params,
+                progress_fn=progress_callback
+            )
+
+            print(f"🔧 DEBUG: optimize_fiberglass вернул: {self.fabric_optimization_result}")
+            print(f"🔧 DEBUG: Тип результата: {type(self.fabric_optimization_result)}")
+            if self.fabric_optimization_result:
+                print(f"🔧 DEBUG: Результат success: {getattr(self.fabric_optimization_result, 'success', 'NO ATTR')}")
+                print(f"🔧 DEBUG: Результат layouts: {getattr(self.fabric_optimization_result, 'layouts', 'NO ATTR')}")
+                if hasattr(self.fabric_optimization_result, 'layouts') and self.fabric_optimization_result.layouts:
+                    print(f"🔧 DEBUG: Количество layouts: {len(self.fabric_optimization_result.layouts)}")
+
+            if self.fabric_optimization_result and self.fabric_optimization_result.success:
+                self.debug_step_signal.emit("✅ Оптимизация фибергласса завершена успешно")
+                # Испускаем сигнал для обновления визуализации
+                self.debug_step_signal.emit(f"🔄 Испускаем сигнал обновления визуализации с {len(self.fabric_optimization_result.layouts) if self.fabric_optimization_result.layouts else 0} рулонами")
+                self.update_visualization_signal.emit(self.fabric_optimization_result)
+            else:
+                error_msg = "Оптимизация фибергласса не удалась"
+                if self.fabric_optimization_result and hasattr(self.fabric_optimization_result, 'message'):
+                    error_msg = self.fabric_optimization_result.message
+                self.debug_step_signal.emit(f"❌ {error_msg}")
+                # Даже при неудаче передаем результат для отображения информации об ошибке
+                self.update_visualization_signal.emit(self.fabric_optimization_result)
+
+        except Exception as e:
+            self.debug_step_signal.emit(f"❌ Ошибка оптимизации фибергласса: {str(e)}")
+            import traceback
+            print(f"Ошибка оптимизации фибергласса: {traceback.format_exc()}")
+
+    def _update_visualization_tab(self, result):
+        """Thread-safe обновление вкладки визуализации"""
+        try:
+            self.debug_step_signal.emit("🔧 _update_visualization_tab вызван")
+            if hasattr(self, 'visualization_tab') and self.visualization_tab is not None:
+                self.debug_step_signal.emit("✅ visualization_tab найден, вызываем set_optimization_result")
+                # Используем QTimer для отложенного вызова, чтобы интерфейс был полностью готов
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(100, lambda: self._safe_set_visualization_result(result))
+            else:
+                self.debug_step_signal.emit("❌ visualization_tab не найден!")
+                print(f"Available attributes: {[attr for attr in dir(self) if 'visual' in attr.lower()]}")
+        except Exception as e:
+            self.debug_step_signal.emit(f"❌ Ошибка обновления визуализации: {str(e)}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+
+    def _safe_set_visualization_result(self, result):
+        """Безопасная установка результата визуализации с задержкой"""
+        try:
+            if hasattr(self, 'visualization_tab') and self.visualization_tab is not None:
+                self.visualization_tab.set_optimization_result(result)
+                if result and hasattr(result, 'layouts') and result.layouts:
+                    self.debug_step_signal.emit(f"✅ Вкладка визуализации обновлена: {len(result.layouts)} рулонов")
+                else:
+                    self.debug_step_signal.emit("ℹ️ Вкладка визуализации очищена (нет данных)")
+            else:
+                self.debug_step_signal.emit("❌ visualization_tab не доступен при отложенном вызове")
+        except Exception as e:
+            self.debug_step_signal.emit(f"❌ Ошибка в _safe_set_visualization_result: {str(e)}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
 
     def on_save_settings_clicked(self):
         """Сохранение текущих параметров оптимизации"""
@@ -981,9 +1174,21 @@ class LinearOptimizerWindow(QMainWindow):
             self.stock_materials = stock_data.get('materials', [])
 
             # Сохраняем данные полотен
-            self.fabric_details = fabric_details
+            print(f"🔧 DEBUG: Присваиваем fabric_details. Было: {len(getattr(self, 'fabric_details', []))} элементов")
+            self.fabric_details = fabric_details  # КРИТИЧНО: присваиваем self.fabric_details!
+            self.current_fabric_details = fabric_details
+            print(f"🔧 DEBUG: После присваивания: {len(self.fabric_details)} элементов в self.fabric_details")
+            print(f"🔧 DEBUG: self.fabric_details is None: {self.fabric_details is None}")
+            if self.fabric_details:
+                print(f"🔧 DEBUG: Тип self.fabric_details: {type(self.fabric_details)}")
             self.fabric_remainders = fabric_stock_data.get('remainders', [])
             self.fabric_materials = fabric_stock_data.get('materials', [])
+            self.current_fabric_remainders = fabric_stock_data.get('remainders', [])
+            self.current_fabric_materials = fabric_stock_data.get('materials', [])
+
+
+
+
             
             # Парсим ID заказов для отображения
             order_ids_text = self.order_id_input.text().strip()
@@ -1103,10 +1308,17 @@ class LinearOptimizerWindow(QMainWindow):
             else:
                 print("⚠️ Нет планов распила для отображения")
             
-            # Активируем кнопку загрузки в Altawin (MOS)
+                        # Активируем кнопку загрузки в Altawin (MOS)
             self.upload_mos_to_altawin_button.setEnabled(True)
             self.distribute_cells_button.setEnabled(True)
-            
+
+            # Обновляем вкладку визуализации с результатами фибергласса (если они есть)
+            if hasattr(self, 'fabric_optimization_result') and self.fabric_optimization_result:
+                self.update_visualization_signal.emit(self.fabric_optimization_result)
+            else:
+                # Если результатов фибергласса нет, передаем пустой результат для очистки вкладки
+                self.update_visualization_signal.emit(None)
+
             # Переключаемся на вкладку результатов
             self.tabs.setCurrentIndex(1)
             
@@ -1240,10 +1452,14 @@ class LinearOptimizerWindow(QMainWindow):
         clear_table(self.fabric_materials_table)
         clear_table(self.results_table)
         self.optimization_result = None
+
         self.upload_mos_to_altawin_button.setEnabled(False)
         self.distribute_cells_button.setEnabled(False)
         self.optimize_button.setEnabled(False)
         self.order_info_label.setText("<заказ не загружен>")
+
+
+
         self.status_bar.showMessage("Готов к работе")
         self.tabs.setCurrentIndex(0)
 
@@ -1330,7 +1546,7 @@ class LinearOptimizerWindow(QMainWindow):
                     
                     # Анализируем результаты оптимизации
                     print(f"🔧 DEBUG: Анализируем {len(self.optimization_result.cut_plans)} планов оптимизации...")
-                    print(f"🔧 DEBUG: Проверяем атрибут count для каждого плана:")
+                    print("🔧 DEBUG: Проверяем атрибут count для каждого плана:")
                     for i, plan in enumerate(self.optimization_result.cut_plans):
                         count = getattr(plan, 'count', 1)
                         print(f"   План {i+1}: count={count}")
@@ -1372,7 +1588,7 @@ class LinearOptimizerWindow(QMainWindow):
                             print(f"🔧 DEBUG: Увеличено количество для ключа {material_key}: теперь {materials_by_size[material_key]['quantity']}шт (добавлено {plan_count}шт)")
                     
                     # Теперь формируем used_materials с правильным количеством
-                    print(f"🔧 DEBUG: Итоговая группировка материалов:")
+                    print("🔧 DEBUG: Итоговая группировка материалов:")
                     for key, data in materials_by_size.items():
                         print(f"   Ключ {key}: goodsid={data['goodsid']}, length={data['length']}, quantity={data['quantity']}шт, is_remainder={data['is_remainder']}")
                     
@@ -1430,16 +1646,16 @@ class LinearOptimizerWindow(QMainWindow):
                     print(f"🔧 DEBUG: Сформировано {len(used_materials)} использованных материалов и {len(business_remainders)} деловых остатков")
                     
                     # Отладочная информация о формировании business_remainders
-                    print(f"🔧 DEBUG: Детализация business_remainders:")
+                    print("🔧 DEBUG: Детализация business_remainders:")
                     for remainder in business_remainders:
                         print(f"   goodsid={remainder['goodsid']}, length={remainder['length']}, quantity={remainder['quantity']}шт")
                     
                     # Отладочная информация о формировании used_materials
-                    print(f"🔧 DEBUG: Детализация used_materials:")
+                    print("🔧 DEBUG: Детализация used_materials:")
                     for material in used_materials:
                         print(f"   goodsid={material['goodsid']}, length={material['length']}, quantity={material['quantity']}шт, groupgoods_thick={material.get('groupgoods_thick', 'N/A')}, is_remainder={material.get('is_remainder', False)}, warehouseremaindersid={material.get('warehouseremaindersid', 'N/A')}")
                     
-                    print(f"🔧 DEBUG: Отправляем данные на сервер:")
+                    print("🔧 DEBUG: Отправляем данные на сервер:")
                     print(f"   grorders_mos_id: {grorders_mos_id}")
                     print(f"   used_materials: {len(used_materials)} записей")
                     print(f"   business_remainders: {len(business_remainders)} записей")
@@ -1550,7 +1766,13 @@ class LinearOptimizerWindow(QMainWindow):
             self.status_bar.showMessage("Ошибка распределения ячеек")
         finally:
             self.distribute_cells_button.setEnabled(True)
-    
+
+
+
+
+
+
+
     def show_optimization_settings(self):
         """Показать настройки оптимизации"""
         dialog = OptimizationSettingsDialog(self, self.optimization_params)
@@ -1620,21 +1842,13 @@ class LinearOptimizerWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Ошибка при копировании таблицы как CSV: {str(e)}")
             self.status_bar.showMessage("❌ Ошибка копирования таблицы как CSV")
 
-    def open_fiberglass_optimizer(self):
-        """Открытие окна оптимизации фибергласса"""
-        try:
-            from .fiberglass_window import FiberglassOptimizationWindow
-            
-            # Создаем и показываем окно фибергласса
-            self.fiberglass_window = FiberglassOptimizationWindow(self)
-            self.fiberglass_window.show()
-            
-            self.status_bar.showMessage("Открыто окно оптимизации фибергласса")
-            
-        except ImportError as e:
-            QMessageBox.critical(self, "Ошибка импорта", f"Не удалось загрузить модуль фибергласса: {str(e)}")
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка открытия окна фибергласса: {str(e)}")
+
+
+
+
+
+
+
 
     def closeEvent(self, event):
         """Обработка закрытия приложения"""
