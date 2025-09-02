@@ -473,9 +473,9 @@ WIDGET_CONFIGS = {
     """,
     
     "stats_labels": {
-        "default": "color: #ffffff; font-weight: bold; background-color: transparent; font-size: 11pt;",
-        "remnants": "color: #4ecdc4; font-weight: bold; background-color: transparent; font-size: 11pt;",
-        "waste": "color: #ff6b6b; font-weight: bold; background-color: transparent; font-size: 11pt;"
+        "default": "color: #333333; font-weight: bold; background-color: transparent; font-size: 11pt;",
+        "remnants": "color: #666666; font-weight: bold; background-color: transparent; font-size: 11pt;",
+        "waste": "color: #999999; font-weight: bold; background-color: transparent; font-size: 11pt;"
     }
 }
 
@@ -507,15 +507,15 @@ COLORS = {
     "accent_red": "#ff6b6b",
     "accent_yellow": "#00ff00",
 
-    # Цвета для визуализации раскроя
-    'sheet_border': '#ffffff',
-    'sheet_fill': '#2A2A2A',
-    'detail_fill': '#4CAF50',
-    'detail_border': '#2E7D32',
-    'remainder_fill': '#FF9800',
-    'remainder_border': '#F57C00',
-    'waste_fill': '#f44336',
-    'waste_border': '#d32f2f',
-    'grid': '#444444',
-    'text': '#ffffff'
+    # Цвета для визуализации раскроя (черно-белая схема)
+    'sheet_border': '#000000',
+    'sheet_fill': '#f0f0f0',
+    'detail_fill': '#c8c8c8',
+    'detail_border': '#646464',
+    'remainder_fill': '#969696',
+    'remainder_border': '#505050',
+    'waste_fill': '#646464',
+    'waste_border': '#323232',
+    'grid': '#646464',
+    'text': '#333333'
 }

@@ -150,8 +150,8 @@ class MoskitkaProfile(BaseModel):
     detail_height: Optional[float] = None
     detail_length: Optional[float] = None  # Длина профиля для раскроя
     detail_qty: Optional[int] = None
-    izd_part: Optional[str] = None  # Часть изделия
-    part_side: Optional[str] = None  # Сторона изделия
+    izdpart: Optional[str] = None  # Часть изделия
+    partside: Optional[str] = None  # Сторона изделия
     
     # Данные товара
     goods_group_name: Optional[str] = None
@@ -305,6 +305,7 @@ class FiberglassDetail(BaseModel):
     izdpart: Optional[str] = None
     goodsid: int    # ID материала
     marking: str    # Артикул материала
+    orderno: str    # Номер заказа
 
 class FiberglassSheet(BaseModel):
     """Лист/рулон фибергласса"""

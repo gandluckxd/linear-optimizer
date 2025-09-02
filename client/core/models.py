@@ -273,6 +273,7 @@ class FiberglassDetail:
     quantity: int   # Количество деталей
     goodsid: int    # ID материала
     marking: str    # Артикул материала
+    orderno: str    # Номер заказа
     modelno: Optional[int] = None
     partside: Optional[str] = None
     izdpart: Optional[str] = None

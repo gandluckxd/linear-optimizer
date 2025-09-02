@@ -149,9 +149,14 @@ class APIClient:
                     partside=data.get('partside'),
                     izdpart=data.get('izdpart'),
                     goodsid=data['goodsid'],
-                    marking=data['marking']
+                    marking=data['marking'],
+                    orderno=data.get('orderno', '')
                 )
                 details.append(detail)
+
+                # Логирование для отладки
+                print(f"🔍 API: Получена деталь из API: {detail.marking}")
+                print(f"🔍 API:   partside='{detail.partside}', izdpart='{detail.izdpart}'")
 
             return details
 

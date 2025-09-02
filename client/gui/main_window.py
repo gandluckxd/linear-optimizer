@@ -1006,7 +1006,10 @@ class LinearOptimizerWindow(QMainWindow):
                     'total_qty': detail.quantity,
                     'goodsid': detail.goodsid,
                     'gp_marking': detail.marking,
-                    'oi_name': detail.item_name
+                    'oi_name': detail.item_name,
+                    'orderno': detail.orderno,  # Номер заказа
+                    'item_name': detail.item_name,  # Номер изделия
+                    'izdpart': detail.izdpart  # Номер части изделия
                 }
                 details_dict.append(detail_dict)
 
@@ -1080,6 +1083,22 @@ class LinearOptimizerWindow(QMainWindow):
 
             if self.fabric_optimization_result and self.fabric_optimization_result.success:
                 self.debug_step_signal.emit("✅ Оптимизация фибергласса завершена успешно")
+
+                # Дополнительная отладка результатов
+                if hasattr(self.fabric_optimization_result, 'layouts') and self.fabric_optimization_result.layouts:
+                    total_remnants = sum(len(layout.get_remnants()) for layout in self.fabric_optimization_result.layouts)
+                    total_waste = sum(len(layout.get_waste()) for layout in self.fabric_optimization_result.layouts)
+                    total_details = sum(len(layout.get_placed_details()) for layout in self.fabric_optimization_result.layouts)
+                    print(f"🔧 DEBUG: Детали: {total_details}, Остатки: {total_remnants}, Отходы: {total_waste}")
+
+                    # Проверяем каждый layout на наличие деловых остатков
+                    for i, layout in enumerate(self.fabric_optimization_result.layouts):
+                        remnants = layout.get_remnants()
+                        if remnants:
+                            print(f"🔧 DEBUG: Layout {i+1} содержит {len(remnants)} деловых остатков:")
+                            for remnant in remnants:
+                                print(f"    - Остаток: {remnant.width:.0f}x{remnant.height:.0f}мм, тип: {remnant.item_type}")
+
                 # Испускаем сигнал для обновления визуализации
                 self.debug_step_signal.emit(f"🔄 Испускаем сигнал обновления визуализации с {len(self.fabric_optimization_result.layouts) if self.fabric_optimization_result.layouts else 0} рулонами")
                 self.update_visualization_signal.emit(self.fabric_optimization_result)

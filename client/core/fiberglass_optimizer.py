@@ -45,6 +45,8 @@ class Detail:
     orderitemsid: str = ""  # ID позиции заказа
     gp_marking: str = ""  # Групповой артикул
     orderno: str = ""  # Номер заказа
+    item_name: str = ""  # Номер изделия
+    izdpart: str = ""  # Номер части изделия
 
     def __post_init__(self):
         self.area = self.width * self.height
@@ -664,11 +666,15 @@ class GuillotineOptimizer:
         # Проверяем условие: меньшая сторона > меньший параметр И большая сторона > больший параметр
         is_business_remainder = (min_side > min_param) and (max_side > max_param)
 
+        # Дополнительная отладка для понимания логики
         print(f"🔧 Проверка делового остатка: {width:.0f}мм x {height:.0f}мм")
         print(f"   Эффективный размер с отступами: {effective_width:.0f}мм x {effective_height:.0f}мм")
         print(f"   Стороны: мин={min_side:.0f}мм, макс={max_side:.0f}мм")
         print(f"   Параметры: мин={min_param:.0f}мм, макс={max_param:.0f}мм")
-        print(f"   Результат: {'деловой остаток' if is_business_remainder else 'отход'}")
+        print(f"   Условия: min_side({min_side:.0f}) > min_param({min_param:.0f}) = {min_side > min_param}")
+        print(f"   Условия: max_side({max_side:.0f}) > max_param({max_param:.0f}) = {max_side > max_param}")
+        print(f"   Финальный результат: {'ДЕЛОВОЙ ОСТАТОК' if is_business_remainder else 'ОТХОД'}")
+        print(f"   ---")
 
         return is_business_remainder
 
@@ -711,6 +717,9 @@ def optimize(details: List[dict], materials: List[dict], remainders: List[dict],
                 detail.gp_marking = str(detail_data.get('gp_marking', ''))
                 detail.orderno = str(detail_data.get('orderno', ''))
                 detail.orderitemsid = detail_data.get('orderitemsid', '')
+                detail.item_name = str(detail_data.get('item_name', ''))
+                detail.izdpart = str(detail_data.get('izdpart', ''))
+                print(f"🔍 OPTIMIZER: Обработана деталь {detail.material}, izdpart='{detail.izdpart}'")
                 if detail.width > 0 and detail.height > 0 and detail.material:
                     detail_objects.append(detail)
                     logger.info(f"🔧 Создана деталь: {detail.oi_name}, материал={detail.material}, goodsid={goodsid}")

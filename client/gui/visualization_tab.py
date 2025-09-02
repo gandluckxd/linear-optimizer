@@ -7,13 +7,16 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QScrollArea, QFrame, QSplitter, QGroupBox, QPushButton,
-    QSlider, QCheckBox, QSpinBox, QFormLayout
+    QSlider, QCheckBox, QSpinBox, QFormLayout, QToolBar,
+    QToolButton, QStatusBar, QMenu, QAction, QShortcut,
+    QGraphicsTextItem
 )
-from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer
-from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QFont, QTransform
+from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer, QEvent, pyqtSignal
+from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QFont, QTransform, QCursor, QPixmap, QIcon
 import math
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass
+import os
 
 from core.models import FiberglassOptimizationResult, FiberglassRollLayout, PlacedFiberglassItem
 
@@ -22,55 +25,460 @@ from core.models import FiberglassOptimizationResult, FiberglassRollLayout, Plac
 class VisualizationSettings:
     """Настройки визуализации"""
     scale: float = 1.0
+    offset_x: float = 0.0
+    offset_y: float = 0.0
     show_grid: bool = True
     show_labels: bool = True
-    show_dimensions: bool = False
+    show_dimensions: bool = True  # Размеры по умолчанию включены
+    show_minimap: bool = True
     grid_size: int = 50  # Размер сетки в пикселях
     margin: int = 20    # Отступы от краев
     roll_spacing: int = 50  # Расстояние между рулонами
+    highlight_on_hover: bool = True
+    show_tooltips: bool = True
+    smooth_zoom: bool = True
+    zoom_step: float = 1.2  # Коэффициент зума
+    min_zoom: float = 0.1
+    max_zoom: float = 5.0
 
 
 class FiberglassCanvas(QFrame):
-    """Холст для отрисовки раскладки фибергласса"""
+    """Холст для отрисовки раскладки фибергласса с поддержкой интерактивности"""
+
+    # Сигналы для коммуникации с родительскими виджетами
+    zoom_changed = pyqtSignal(float)  # scale: float
+    pan_changed = pyqtSignal(float, float)  # offset_x, offset_y
+    item_hovered = pyqtSignal(object)  # hovered_item
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(800, 600)
         self.setFrameStyle(QFrame.Box)
 
+        # Включаем прием событий мыши и колесика
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+
         # Данные для отрисовки
         self.layout: Optional[FiberglassRollLayout] = None
         self.settings = VisualizationSettings()
 
-        # Цвета для разных типов элементов
+        # Состояние мыши и интерактивности
+        self.is_dragging = False
+        self.last_mouse_pos = QPointF()
+        self.hovered_item: Optional[PlacedFiberglassItem] = None
+        self.selected_items: List[PlacedFiberglassItem] = []
+
+        # Цвета для разных типов элементов (черно-белая схема)
         self.colors = {
-            'detail': QColor(100, 150, 255),      # Синий для деталей
-            'remainder': QColor(150, 255, 150),   # Зеленый для деловых остатков
-            'waste': QColor(255, 100, 100),       # Красный для отходов
+            'detail': QColor(200, 200, 200),      # Светло-серый для деталей
+            'remainder': QColor(150, 150, 150),   # Средне-серый для деловых остатков
+            'waste': QColor(100, 100, 100),       # Темно-серый для отходов
             'background': QColor(240, 240, 240),  # Фон
-            'grid': QColor(200, 200, 200),        # Сетка
+            'grid': QColor(100, 100, 100, 150),   # Темная сетка с прозрачностью
             'text': QColor(50, 50, 50),           # Текст
-            'roll_border': QColor(0, 0, 0)        # Граница рулона
+            'roll_border': QColor(0, 0, 0),       # Граница рулона
+            'highlight': QColor(255, 255, 0, 100), # Подсветка при наведении (желтая)
+            'selection': QColor(255, 215, 0, 150), # Выделение (золотистое)
+            'minimap_bg': QColor(245, 245, 245), # Фон мини-карты
+            'minimap_border': QColor(150, 150, 150), # Граница мини-карты
+            'minimap_viewport': QColor(100, 100, 255, 100) # Область просмотра на мини-карте (синяя)
         }
 
         # Шрифты
         self.fonts = {
             'label': QFont('Arial', 8),
-            'dimension': QFont('Arial', 7)
+            'dimension': QFont('Arial', 7),
+            'tooltip': QFont('Arial', 9, QFont.Bold)
         }
+
+        # Кэш для производительности
+        self._cached_pixmap: Optional[QPixmap] = None
+        self._cache_valid = False
 
     def set_layout(self, layout: FiberglassRollLayout):
         """Установить раскладку для отрисовки"""
         self.layout = layout
+        self._cache_valid = False
         self.update()
 
     def set_settings(self, settings: VisualizationSettings):
         """Установить настройки визуализации"""
         self.settings = settings
+        self._cache_valid = False
         self.update()
 
+    def wheelEvent(self, event):
+        """Обработка колесика мыши для зума"""
+        if not self.layout:
+            return
+
+        # Определяем центр зума (позиция курсора)
+        center_pos = event.pos()
+
+        # Вычисляем коэффициент зума
+        zoom_factor = self.settings.zoom_step if event.angleDelta().y() > 0 else 1.0 / self.settings.zoom_step
+
+        # Ограничиваем масштаб
+        new_scale = self.settings.scale * zoom_factor
+        new_scale = max(self.settings.min_zoom, min(self.settings.max_zoom, new_scale))
+
+        if abs(new_scale - self.settings.scale) < 0.01:
+            return  # Масштаб не изменился существенно
+
+        # Вычисляем смещение, чтобы зум был относительно курсора
+        scale_ratio = new_scale / self.settings.scale
+
+        # Преобразуем позицию курсора в координаты раскладки
+        layout_x = (center_pos.x() - self.settings.offset_x) / self.settings.scale
+        layout_y = (center_pos.y() - self.settings.offset_y) / self.settings.scale
+
+        # Обновляем масштаб и смещение
+        self.settings.scale = new_scale
+        self.settings.offset_x = center_pos.x() - layout_x * new_scale
+        self.settings.offset_y = center_pos.y() - layout_y * new_scale
+
+        self._cache_valid = False
+        self.update()
+
+        # Отправляем сигнал об изменении масштаба
+        self.zoom_changed.emit(self.settings.scale)
+
+    def mousePressEvent(self, event):
+        """Обработка нажатия кнопки мыши"""
+        if event.button() == Qt.LeftButton:
+            self.is_dragging = True
+            self.last_mouse_pos = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+
+            # Проверяем, нажали ли на элемент
+            if self.layout and self.settings.highlight_on_hover:
+                clicked_item = self._get_item_at_position(event.pos())
+                if clicked_item:
+                    if event.modifiers() & Qt.ControlModifier:
+                        # Ctrl+клик - добавление/удаление из выделения
+                        if clicked_item in self.selected_items:
+                            self.selected_items.remove(clicked_item)
+                        else:
+                            self.selected_items.append(clicked_item)
+                    else:
+                        # Обычный клик - новое выделение
+                        self.selected_items = [clicked_item]
+                    self._cache_valid = False
+                    self.update()
+
+        elif event.button() == Qt.RightButton:
+            # Правая кнопка - контекстное меню
+            self._show_context_menu(event.pos())
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Обработка движения мыши"""
+        if self.is_dragging and self.layout:
+            # Перетаскивание холста
+            delta = event.pos() - self.last_mouse_pos
+            self.settings.offset_x += delta.x()
+            self.settings.offset_y += delta.y()
+            self.last_mouse_pos = event.pos()
+            self._cache_valid = False
+            self.update()
+
+            # Отправляем сигнал об изменении позиции
+            self.pan_changed.emit(self.settings.offset_x, self.settings.offset_y)
+        else:
+            # Обновляем hovered элемент
+            if self.layout and self.settings.highlight_on_hover:
+                new_hovered = self._get_item_at_position(event.pos())
+                if new_hovered != self.hovered_item:
+                    self.hovered_item = new_hovered
+                    self._cache_valid = False
+                    self.update()
+
+                    # Отправляем сигнал о наведении
+                    self.item_hovered.emit(new_hovered)
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Обработка отпускания кнопки мыши"""
+        if event.button() == Qt.LeftButton:
+            self.is_dragging = False
+            self.setCursor(Qt.ArrowCursor)
+
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        """Обработка нажатий клавиш"""
+        if event.key() == Qt.Key_Escape:
+            # Сброс выделения
+            self.selected_items.clear()
+            self._cache_valid = False
+            self.update()
+        elif event.key() == Qt.Key_Delete:
+            # Удаление выделенных элементов (если поддерживается)
+            pass
+
+        super().keyPressEvent(event)
+
+    def _get_item_at_position(self, pos: QPointF) -> Optional[PlacedFiberglassItem]:
+        """Определить элемент под указанной позицией"""
+        if not self.layout:
+            return None
+
+        # Преобразуем позицию курсора в координаты раскладки
+        layout_x = (pos.x() - self.settings.offset_x) / self.settings.scale
+        layout_y = (pos.y() - self.settings.offset_y) / self.settings.scale
+
+        # Проверяем все элементы
+        for item in self.layout.placed_items:
+            if (item.x <= layout_x <= item.x + item.width and
+                item.y <= layout_y <= item.y + item.height):
+                return item
+
+        return None
+
+    def _show_context_menu(self, pos):
+        """Показать контекстное меню"""
+        menu = QMenu(self)
+
+        # Действия для выделенных элементов
+        if self.selected_items:
+            copy_action = menu.addAction("📋 Копировать информацию")
+            copy_action.triggered.connect(lambda: self._copy_item_info())
+
+            menu.addSeparator()
+
+            clear_selection_action = menu.addAction("❌ Снять выделение")
+            clear_selection_action.triggered.connect(lambda: self._clear_selection())
+
+        menu.addSeparator()
+
+        # Общие действия
+        zoom_in_action = menu.addAction("🔍 Увеличить")
+        zoom_in_action.triggered.connect(self.zoom_in)
+
+        zoom_out_action = menu.addAction("🔍 Уменьшить")
+        zoom_out_action.triggered.connect(self.zoom_out)
+
+        fit_action = menu.addAction("📐 Вписать в окно")
+        fit_action.triggered.connect(self.fit_to_view)
+
+        menu.addSeparator()
+
+        export_action = menu.addAction("💾 Экспорт изображения...")
+        export_action.triggered.connect(self.export_image)
+
+        menu.exec_(self.mapToGlobal(pos))
+
+    def _copy_item_info(self):
+        """Копировать информацию о выделенных элементах"""
+        if not self.selected_items:
+            return
+
+        info_lines = []
+        for item in self.selected_items:
+            if item.item_type == 'detail' and item.detail:
+                info_lines.append(f"Деталь: {item.detail.marking}")
+                info_lines.append(f"Размеры: {item.width}×{item.height}мм")
+                info_lines.append(f"Позиция: ({item.x}, {item.y})")
+                info_lines.append(f"Поворот: {'Да' if item.is_rotated else 'Нет'}")
+            elif item.item_type == 'remainder':
+                info_lines.append(f"Деловой остаток: {item.width}×{item.height}мм")
+                info_lines.append(f"Позиция: ({item.x}, {item.y})")
+            else:
+                info_lines.append(f"Отход: {item.width}×{item.height}мм")
+                info_lines.append(f"Позиция: ({item.x}, {item.y})")
+            info_lines.append("")
+
+        # Копируем в буфер обмена
+        from PyQt5.QtWidgets import QApplication
+        clipboard = QApplication.clipboard()
+        clipboard.setText("\n".join(info_lines))
+
+    def _clear_selection(self):
+        """Снять выделение"""
+        self.selected_items.clear()
+        self._cache_valid = False
+        self.update()
+
+    def zoom_in(self):
+        """Увеличить масштаб (для контекстного меню)"""
+        center_pos = QPointF(self.width() / 2, self.height() / 2)
+        self._zoom_at_point(center_pos, self.settings.zoom_step)
+
+    def zoom_out(self):
+        """Уменьшить масштаб (для контекстного меню)"""
+        center_pos = QPointF(self.width() / 2, self.height() / 2)
+        self._zoom_at_point(center_pos, 1.0 / self.settings.zoom_step)
+
+    def fit_to_view(self):
+        """Вписать раскладку в область просмотра"""
+        if not self.layout:
+            return
+
+        roll_width = self.layout.sheet.width
+        roll_height = self.layout.sheet.height
+
+        # Вычисляем масштаб для вписывания
+        canvas_width = self.width() - 2 * self.settings.margin
+        canvas_height = self.height() - 2 * self.settings.margin
+
+        scale_x = canvas_width / roll_width if roll_width > 0 else 1.0
+        scale_y = canvas_height / roll_height if roll_height > 0 else 1.0
+
+        self.settings.scale = min(scale_x, scale_y, 1.0)
+        self.settings.offset_x = (self.width() - roll_width * self.settings.scale) / 2
+        self.settings.offset_y = (self.height() - roll_height * self.settings.scale) / 2
+
+        self._cache_valid = False
+        self.update()
+
+    def _zoom_at_point(self, center_pos: QPointF, zoom_factor: float):
+        """Зум относительно указанной точки"""
+        if not self.layout:
+            return
+
+        # Ограничиваем масштаб
+        new_scale = self.settings.scale * zoom_factor
+        new_scale = max(self.settings.min_zoom, min(self.settings.max_zoom, new_scale))
+
+        if abs(new_scale - self.settings.scale) < 0.01:
+            return
+
+        # Преобразуем позицию в координаты раскладки
+        layout_x = (center_pos.x() - self.settings.offset_x) / self.settings.scale
+        layout_y = (center_pos.y() - self.settings.offset_y) / self.settings.scale
+
+        # Обновляем масштаб и смещение
+        self.settings.scale = new_scale
+        self.settings.offset_x = center_pos.x() - layout_x * new_scale
+        self.settings.offset_y = center_pos.y() - layout_y * new_scale
+
+        self._cache_valid = False
+        self.update()
+
+    def export_image(self):
+        """Экспорт изображения раскладки с расширенными форматами"""
+        if not self.layout:
+            return
+
+        from PyQt5.QtWidgets import QFileDialog
+        filename, selected_filter = QFileDialog.getSaveFileName(
+            self, "Экспорт изображения", "",
+            "PNG файлы (*.png);;JPEG файлы (*.jpg);;BMP файлы (*.bmp);;PDF файлы (*.pdf)"
+        )
+
+        if not filename:
+            return
+
+        # Определяем формат по расширению файла
+        if filename.lower().endswith('.pdf'):
+            self._export_to_pdf(filename)
+        else:
+            self._export_to_image(filename)
+
+    def _export_to_image(self, filename):
+        """Экспорт в растровые форматы"""
+        # Создаем изображение нужного размера
+        roll_width = int(self.layout.sheet.width * self.settings.scale)
+        roll_height = int(self.layout.sheet.height * self.settings.scale)
+
+        pixmap = QPixmap(roll_width + 2 * self.settings.margin,
+                       roll_height + 2 * self.settings.margin)
+        pixmap.fill(self.colors['background'])
+
+        # Отрисовываем раскладку
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Временные настройки для экспорта (без смещения)
+        temp_settings = self.settings
+        temp_settings.offset_x = self.settings.margin
+        temp_settings.offset_y = self.settings.margin
+
+        self._draw_roll_border(painter, temp_settings.offset_x, temp_settings.offset_y,
+                             roll_width, roll_height)
+
+        for item in self.layout.placed_items:
+            self._draw_item(painter, item, temp_settings.offset_x, temp_settings.offset_y,
+                          temp_settings.scale)
+
+        painter.end()
+
+        # Сохраняем изображение
+        if not pixmap.save(filename):
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Ошибка экспорта", "Не удалось сохранить изображение")
+
+    def _export_to_pdf(self, filename):
+        """Экспорт в PDF формат"""
+        try:
+            from PyQt5.QtGui import QPdfWriter, QPainter
+            from PyQt5.QtCore import QRectF
+
+            # Создаем PDF writer
+            pdf_writer = QPdfWriter(filename)
+            pdf_writer.setPageSize(QPdfWriter.A4)
+            pdf_writer.setResolution(300)  # Высокое разрешение
+
+            # Вычисляем размеры для PDF
+            roll_width = self.layout.sheet.width
+            roll_height = self.layout.sheet.height
+
+            # Масштабируем для A4 (предполагаем альбомную ориентацию)
+            page_width = 210  # мм (A4 ширина)
+            page_height = 297  # мм (A4 высота)
+
+            # Вычисляем масштаб для вписывания
+            scale_x = (page_width - 20) / roll_width  # с отступами
+            scale_y = (page_height - 20) / roll_height
+            pdf_scale = min(scale_x, scale_y, 1.0)
+
+            painter = QPainter(pdf_writer)
+            painter.setRenderHint(QPainter.Antialiasing)
+
+            # Устанавливаем масштаб и смещение для PDF
+            pdf_margin = 10  # мм
+            pdf_offset_x = pdf_margin
+            pdf_offset_y = pdf_margin
+
+            # Рисуем границы рулона
+            painter.setPen(QPen(self.colors['roll_border'], 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(int(pdf_offset_x), int(pdf_offset_y),
+                           int(roll_width * pdf_scale), int(roll_height * pdf_scale))
+
+            # Рисуем элементы
+            for item in self.layout.placed_items:
+                item_x = pdf_offset_x + item.x * pdf_scale
+                item_y = pdf_offset_y + item.y * pdf_scale
+                item_width = item.width * pdf_scale
+                item_height = item.height * pdf_scale
+
+                # Выбираем цвет (черно-белая схема, все элементы без заливки)
+                if item.item_type == 'detail':
+                    color = QColor(255, 255, 255, 0)  # Прозрачная заливка для деталей
+                    border_color = QColor(100, 100, 100)  # Темно-серый для деталей
+                elif item.item_type == 'remainder':
+                    color = QColor(255, 255, 255, 0)  # Прозрачная заливка для остатков
+                    border_color = QColor(80, 80, 80)    # Средне-темно-серый для остатков
+                else:
+                    color = QColor(255, 255, 255, 0)     # Прозрачная заливка для отходов
+                    border_color = QColor(50, 50, 50)     # Очень темный серый для отходов
+
+                painter.setPen(QPen(border_color, 0.5))
+                painter.setBrush(QBrush(color))
+                painter.drawRect(int(item_x), int(item_y), int(item_width), int(item_height))
+
+            painter.end()
+
+        except Exception as e:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Ошибка экспорта PDF", f"Не удалось создать PDF файл:\n{str(e)}")
+
     def paintEvent(self, event):
-        """Отрисовка раскладки"""
+        """Отрисовка раскладки с поддержкой кэширования"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
@@ -85,13 +493,13 @@ class FiberglassCanvas(QFrame):
         roll_width = self.layout.sheet.width
         roll_height = self.layout.sheet.height
 
+        # Используем смещение из настроек вместо центрирования
+        offset_x = self.settings.offset_x
+        offset_y = self.settings.offset_y
+
         # Масштабируем размеры
         scaled_width = roll_width * self.settings.scale
         scaled_height = roll_height * self.settings.scale
-
-        # Центрируем рулон на холсте
-        offset_x = (self.width() - scaled_width) / 2
-        offset_y = (self.height() - scaled_height) / 2
 
         # Рисуем сетку
         if self.settings.show_grid:
@@ -107,6 +515,10 @@ class FiberglassCanvas(QFrame):
         # Рисуем информацию о рулоне
         self._draw_roll_info(painter, offset_x, offset_y, scaled_width, scaled_height)
 
+        # Рисуем мини-карту если включена
+        if self.settings.show_minimap:
+            self._draw_minimap(painter)
+
     def _draw_empty_state(self, painter: QPainter):
         """Отрисовка пустого состояния"""
         painter.setPen(QPen(self.colors['text']))
@@ -120,19 +532,30 @@ class FiberglassCanvas(QFrame):
     def _draw_grid(self, painter: QPainter, offset_x: float, offset_y: float,
                    width: float, height: float):
         """Отрисовка сетки"""
+        # Сохраняем текущее состояние рисования
+        painter.save()
+
+        # Устанавливаем цвет и стиль сетки
         painter.setPen(QPen(self.colors['grid'], 1, Qt.DotLine))
+        painter.setOpacity(0.6)  # Дополнительная прозрачность
+
+        # Вычисляем размер сетки с учетом масштаба (делаем сетку плотнее при увеличении)
+        scaled_grid_size = max(20, self.settings.grid_size / max(0.1, self.settings.scale))
 
         # Вертикальные линии
         x = offset_x
         while x <= offset_x + width:
             painter.drawLine(int(x), int(offset_y), int(x), int(offset_y + height))
-            x += self.settings.grid_size
+            x += scaled_grid_size
 
         # Горизонтальные линии
         y = offset_y
         while y <= offset_y + height:
             painter.drawLine(int(offset_x), int(y), int(offset_x + width), int(y))
-            y += self.settings.grid_size
+            y += scaled_grid_size
+
+        # Восстанавливаем состояние рисования
+        painter.restore()
 
     def _draw_roll_border(self, painter: QPainter, offset_x: float, offset_y: float,
                          width: float, height: float):
@@ -143,59 +566,141 @@ class FiberglassCanvas(QFrame):
 
     def _draw_item(self, painter: QPainter, item: PlacedFiberglassItem,
                    offset_x: float, offset_y: float, scale: float):
-        """Отрисовка размещенного элемента"""
+        """Отрисовка размещенного элемента с поддержкой подсветки и выделения"""
         # Вычисляем координаты с учетом масштаба
         x = offset_x + item.x * scale
         y = offset_y + item.y * scale
         width = item.width * scale
         height = item.height * scale
 
-        # Выбираем цвет в зависимости от типа
+        # Выбираем цвет в зависимости от типа (черно-белая схема, все элементы без заливки)
         if item.item_type == 'detail':
-            color = self.colors['detail']
-            border_color = QColor(50, 100, 200)
+            color = QColor(255, 255, 255, 0)  # Прозрачная заливка для деталей
+            border_color = QColor(100, 100, 100)  # Темно-серый для деталей
         elif item.item_type == 'remainder':
-            color = self.colors['remainder']
-            border_color = QColor(100, 200, 100)
+            color = QColor(255, 255, 255, 0)  # Прозрачная заливка для остатков
+            border_color = QColor(80, 80, 80)    # Средне-темно-серый для остатков
         else:  # waste
-            color = self.colors['waste']
-            border_color = QColor(200, 50, 50)
+            color = QColor(255, 255, 255, 0)     # Прозрачная заливка для отходов
+            border_color = QColor(50, 50, 50)     # Очень темный серый для отходов
 
-        # Рисуем прямоугольник
-        painter.setPen(QPen(border_color, 1))
+        # Проверяем, нужно ли рисовать подсветку или выделение
+        is_highlighted = (self.settings.highlight_on_hover and item == self.hovered_item)
+        is_selected = item in self.selected_items
+
+        # Рисуем подсветку/выделение
+        if is_highlighted or is_selected:
+            highlight_color = self.colors['selection'] if is_selected else self.colors['highlight']
+            painter.setPen(QPen(highlight_color, 3))
+            painter.setBrush(QBrush(highlight_color))
+            painter.drawRect(int(x - 2), int(y - 2), int(width + 4), int(height + 4))
+
+        # Рисуем основной прямоугольник
+        painter.setPen(QPen(border_color, 2 if is_selected else 1))
         painter.setBrush(QBrush(color))
         painter.drawRect(int(x), int(y), int(width), int(height))
 
-        # Рисуем метку если включено
-        if self.settings.show_labels and width > 30 and height > 20:
+        # Рисуем метку всегда для всех элементов
+        if self.settings.show_labels:
             self._draw_item_label(painter, item, x, y, width, height)
 
-        # Рисуем размеры если включено
-        if self.settings.show_dimensions:
-            self._draw_item_dimensions(painter, item, x, y, width, height)
+        # Рисуем размеры если включено (ПОКА ОТКЛЮЧЕНО)
+        # if self.settings.show_dimensions:
+        #     self._draw_item_dimensions(painter, item, x, y, width, height)
 
     def _draw_item_label(self, painter: QPainter, item: PlacedFiberglassItem,
                         x: float, y: float, width: float, height: float):
-        """Отрисовка метки элемента"""
-        painter.setPen(QPen(self.colors['text']))
-        painter.setFont(self.fonts['label'])
+        """Отрисовка метки элемента с полной информацией в 3 строки"""
+        # Определяем текст для отображения
+        text_parts = []
 
-        label_text = ""
         if item.item_type == 'detail' and item.detail:
-            label_text = f"{item.detail.marking}"
-            if item.is_rotated:
-                label_text += " ↻"
-        elif item.item_type == 'remainder':
-            label_text = "ОСТ"
-        elif item.item_type == 'waste':
-            label_text = "ОТХ"
+            # 1) Номер заказа
+            if hasattr(item.detail, 'orderno') and item.detail.orderno:
+                text_parts.append(str(item.detail.orderno))
+            
+            # 2) Номер изделия + / + номер части изделия
+            line2_parts = []
+            if hasattr(item.detail, 'item_name') and item.detail.item_name:
+                line2_parts.append(str(item.detail.item_name))
+            if hasattr(item.detail, 'izdpart') and item.detail.izdpart:
+                line2_parts.append(str(item.detail.izdpart))
+            
+            if line2_parts:
+                text_parts.append("/".join(line2_parts))
+            
+            # 3) Размеры
+            text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
 
-        if label_text:
-            # Центрируем текст
-            text_rect = painter.fontMetrics().boundingRect(label_text)
-            text_x = x + (width - text_rect.width()) / 2
-            text_y = y + (height + text_rect.height()) / 2
-            painter.drawText(int(text_x), int(text_y), label_text)
+            # Признак поворота добавляем к размерам
+            if item.is_rotated:
+                text_parts[-1] += " ↻"
+
+        elif item.item_type == 'remainder':
+            # Всегда показываем размеры остатков
+            text_parts.append("ОСТ")
+            text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
+
+        elif item.item_type == 'waste':
+            # Всегда показываем размеры отходов
+            text_parts.append("ОТХ")
+            text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
+
+        if text_parts:
+            # Вычисляем адаптивный размер шрифта с учетом масштаба
+            # Для многострочного текста используем объединенный текст для расчета размера
+            full_text_for_size = "\n".join(text_parts)
+            font_size = _calculate_adaptive_font_size_with_scale(full_text_for_size, width, height, self.settings.scale)
+
+            if font_size >= 6:  # Рисуем текст если шрифт >= 6pt (минимальный читаемый размер)
+                # Выбираем цвет текста в зависимости от типа элемента (все элементы без заливки)
+                if item.item_type == 'detail':
+                    painter.setPen(QPen(QColor(0, 0, 0)))        # Черный текст на прозрачном фоне
+                elif item.item_type == 'remainder':
+                    painter.setPen(QPen(QColor(0, 0, 0)))        # Черный текст на прозрачном фоне
+                else:  # waste
+                    painter.setPen(QPen(QColor(0, 0, 0)))        # Черный текст на прозрачном фоне
+
+                painter.setFont(QFont("Arial", font_size, QFont.Weight.Bold))
+                
+                # Получаем метрики шрифта для расчета высоты строки
+                font_metrics = painter.fontMetrics()
+                line_height = font_metrics.height()
+                
+                # Вычисляем общую высоту текста
+                total_text_height = len(text_parts) * line_height
+                
+                # Определяем ориентацию текста в зависимости от формы элемента
+                if width > height:
+                    # Горизонтально вытянутый элемент - текст горизонтально
+                    # Начальная позиция Y (центрируем весь блок текста)
+                    start_y = y + (height - total_text_height) / 2 + line_height
+                    
+                    # Рисуем каждую строку отдельно
+                    for i, line in enumerate(text_parts):
+                        if line.strip():  # Пропускаем пустые строки
+                            line_width = font_metrics.width(line)
+                            text_x = x + (width - line_width) / 2  # Центрируем каждую строку
+                            text_y = start_y + i * line_height
+                            painter.drawText(int(text_x), int(text_y), line)
+                else:
+                    # Вертикально вытянутый элемент - поворачиваем текст на 90 градусов
+                    painter.save()
+                    painter.translate(x + width / 2, y + height / 2)
+                    painter.rotate(-90)
+                    
+                    # Начальная позиция Y для повернутого текста (центрируем весь блок)
+                    start_y = -(total_text_height / 2) + line_height
+                    
+                    # Рисуем каждую строку отдельно
+                    for i, line in enumerate(text_parts):
+                        if line.strip():  # Пропускаем пустые строки
+                            line_width = font_metrics.width(line)
+                            text_x = -line_width / 2  # Центрируем каждую строку
+                            text_y = start_y + i * line_height
+                            painter.drawText(int(text_x), int(text_y), line)
+                    
+                    painter.restore()
 
     def _draw_item_dimensions(self, painter: QPainter, item: PlacedFiberglassItem,
                              x: float, y: float, width: float, height: float):
@@ -218,15 +723,163 @@ class FiberglassCanvas(QFrame):
     def _draw_roll_info(self, painter: QPainter, offset_x: float, offset_y: float,
                        width: float, height: float):
         """Отрисовка информации о рулоне"""
+        if not self.layout:
+            return
+
         painter.setPen(QPen(self.colors['text']))
         painter.setFont(QFont('Arial', 10, QFont.Bold))
 
-        info_text = ".0f"".1f"".0f"".1f"".1f"".1f"
+        # Показываем размеры рулона
+        info_text = f"Рулон: {self.layout.sheet.width:.0f}×{self.layout.sheet.height:.0f}мм"
         painter.drawText(int(offset_x), int(offset_y - 5), info_text)
+
+    def _draw_minimap(self, painter: QPainter):
+        """Отрисовка мини-карты"""
+        if not self.layout:
+            return
+
+        # Размеры мини-карты
+        minimap_size = 150
+        minimap_margin = 10
+        minimap_x = self.width() - minimap_size - minimap_margin
+        minimap_y = minimap_margin
+
+        # Рисуем фон мини-карты
+        painter.setPen(QPen(self.colors['minimap_border'], 1))
+        painter.setBrush(QBrush(self.colors['minimap_bg']))
+        painter.drawRect(minimap_x, minimap_y, minimap_size, minimap_size)
+
+        # Вычисляем масштаб мини-карты
+        roll_width = self.layout.sheet.width
+        roll_height = self.layout.sheet.height
+        max_roll_size = max(roll_width, roll_height)
+
+        if max_roll_size > 0:
+            minimap_scale = (minimap_size - 10) / max_roll_size
+            minimap_roll_width = roll_width * minimap_scale
+            minimap_roll_height = roll_height * minimap_scale
+
+            # Центрируем рулон на мини-карте
+            minimap_roll_x = minimap_x + (minimap_size - minimap_roll_width) / 2
+            minimap_roll_y = minimap_y + (minimap_size - minimap_roll_height) / 2
+
+            # Рисуем рулон на мини-карте
+            painter.setPen(QPen(self.colors['roll_border'], 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(int(minimap_roll_x), int(minimap_roll_y),
+                           int(minimap_roll_width), int(minimap_roll_height))
+
+            # Рисуем элементы на мини-карте
+            for item in self.layout.placed_items:
+                item_x = minimap_roll_x + item.x * minimap_scale
+                item_y = minimap_roll_y + item.y * minimap_scale
+                item_width = item.width * minimap_scale
+                item_height = item.height * minimap_scale
+
+                # Выбираем цвет для мини-карты
+                if item.item_type == 'detail':
+                    color = self.colors['detail']
+                elif item.item_type == 'remainder':
+                    color = self.colors['remainder']
+                else:
+                    color = self.colors['waste']
+
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QBrush(color))
+                painter.drawRect(int(item_x), int(item_y), max(1, int(item_width)), max(1, int(item_height)))
+
+            # Рисуем область просмотра
+            if self.layout:
+                # Вычисляем область просмотра на мини-карте
+                view_left = minimap_roll_x - (self.settings.offset_x - minimap_roll_x) / self.settings.scale * minimap_scale
+                view_top = minimap_roll_y - (self.settings.offset_y - minimap_roll_y) / self.settings.scale * minimap_scale
+                view_width = self.width() / self.settings.scale * minimap_scale
+                view_height = self.height() / self.settings.scale * minimap_scale
+
+                painter.setPen(QPen(self.colors['minimap_viewport'], 2))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(int(view_left), int(view_top), int(view_width), int(view_height))
+
+
+def _calculate_adaptive_font_size_with_scale(text, rect_width, rect_height, scale):
+    """
+    Вычисляет оптимальный размер шрифта для текста в прямоугольнике с учетом масштаба
+    Улучшенная версия для обеспечения видимости на всех масштабах
+
+    Args:
+        text: текст для отображения
+        rect_width: ширина прямоугольника в пикселях
+        rect_height: высота прямоугольника в пикселях
+        scale: текущий масштаб визуализации
+
+    Returns:
+        int: размер шрифта (минимальный 6pt)
+    """
+    # Учитываем масштаб - при отдалении увеличиваем базовый размер шрифта
+    scale_factor = max(1.0, 2.0 / scale)  # При отдалении (scale < 1) увеличиваем шрифт
+
+    min_dimension = min(rect_width, rect_height)
+
+    # Базовые размеры с учетом масштаба
+    if min_dimension > 400:
+        base_font_size = int(28 * scale_factor)
+    elif min_dimension > 200:
+        base_font_size = int(24 * scale_factor)
+    elif min_dimension > 100:
+        base_font_size = int(20 * scale_factor)
+    elif min_dimension > 50:
+        base_font_size = int(16 * scale_factor)
+    else:
+        base_font_size = int(12 * scale_factor)
+
+    # Ограничиваем максимальный размер шрифта
+    base_font_size = min(base_font_size, 36)
+
+    # Минимальный размер шрифта для читаемости
+    min_font_size = 6
+
+    # Пробуем размеры от базового до минимального
+    for font_size in range(max(base_font_size, min_font_size), min_font_size - 1, -1):
+        # Создаем временный элемент для измерения
+        temp_item = QGraphicsTextItem(text)
+        temp_item.setFont(QFont("Arial", font_size, QFont.Weight.Bold))
+        text_rect = temp_item.boundingRect()
+
+        # Меньшие требования для маленьких элементов при сильном отдалении
+        if min_dimension < 100 and scale < 0.5:
+            margin = 0.9  # 90% заполнения для маленьких элементов при отдалении
+        elif min_dimension < 100:
+            margin = 0.8  # 80% заполнения для маленьких элементов
+        else:
+            margin = 0.85  # 85% заполнения для больших элементов
+
+        # Проверяем, помещается ли текст
+        if (text_rect.width() <= rect_width * margin and
+            text_rect.height() <= rect_height * margin):
+            return font_size
+
+    # Если ничего не подошло, все равно возвращаем минимальный размер для читаемости
+    return min_font_size
+
+
+def _calculate_adaptive_font_size(text, rect_width, rect_height):
+    """
+    Вычисляет оптимальный размер шрифта для текста в прямоугольнике
+    Улучшенная версия из Glass Optimizer с увеличенными размерами
+
+    Args:
+        text: текст для отображения
+        rect_width: ширина прямоугольника
+        rect_height: высота прямоугольника
+
+    Returns:
+        int: размер шрифта (0 если текст не помещается)
+    """
+    return _calculate_adaptive_font_size_with_scale(text, rect_width, rect_height, 1.0)
 
 
 class VisualizationTab(QWidget):
-    """Вкладка визуализации раскроя"""
+    """Вкладка визуализации раскроя с улучшенным управлением"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -234,15 +887,18 @@ class VisualizationTab(QWidget):
         self.current_roll_index = 0
         self.settings = VisualizationSettings()
 
+        # Сигналы для обновления статусбара
+        self.status_update_requested = None  # Будет установлен в init
+
         self.init_ui()
 
     def init_ui(self):
-        """Инициализация интерфейса"""
+        """Инициализация интерфейса с улучшенными элементами управления"""
         layout = QVBoxLayout(self)
 
-        # Верхняя панель управления
-        self.create_control_panel()
-        layout.addWidget(self.control_panel)
+        # Панель инструментов
+        self.create_toolbar()
+        layout.addWidget(self.toolbar)
 
         # Основная область с разделителем
         splitter = QSplitter(Qt.Horizontal)
@@ -261,31 +917,180 @@ class VisualizationTab(QWidget):
         splitter.setSizes([300, 800])
         layout.addWidget(splitter)
 
-    def create_control_panel(self):
-        """Создание панели управления"""
-        self.control_panel = QGroupBox("Управление визуализацией")
-        layout = QHBoxLayout(self.control_panel)
+        # Подключаем сигналы холста
+        self.canvas.zoom_changed.connect(self._on_zoom_changed)
+        self.canvas.pan_changed.connect(self._on_pan_changed)
+        self.canvas.item_hovered.connect(self._on_item_hovered)
+
+        # Статус бар для отображения информации
+        self.status_bar = QStatusBar()
+        layout.addWidget(self.status_bar)
+
+        self.update_status_bar()
+
+    def create_toolbar(self):
+        """Создание панели инструментов с улучшенными элементами управления"""
+        self.toolbar = QToolBar("Визуализация")
+        self.toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toolbar.setMovable(False)
 
         # Выбор рулона
-        layout.addWidget(QLabel("Рулон:"))
+        self.toolbar.addWidget(QLabel("Рулон:"))
         self.roll_combo = QComboBox()
+        self.roll_combo.setMinimumWidth(150)
         self.roll_combo.currentIndexChanged.connect(self.on_roll_changed)
-        layout.addWidget(self.roll_combo)
+        self.toolbar.addWidget(self.roll_combo)
 
-        layout.addStretch()
+        self.toolbar.addSeparator()
+
+        # Кнопки навигации
+        self.home_btn = QToolButton()
+        self.home_btn.setText("🏠")
+        self.home_btn.setToolTip("Сбросить вид (Ctrl+0)")
+        self.home_btn.clicked.connect(self.reset_view)
+        self.toolbar.addWidget(self.home_btn)
+
+        self.fit_btn = QToolButton()
+        self.fit_btn.setText("📐")
+        self.fit_btn.setToolTip("Вписать в окно (Ctrl+F)")
+        self.fit_btn.clicked.connect(self.fit_to_view)
+        self.toolbar.addWidget(self.fit_btn)
+
+        self.toolbar.addSeparator()
 
         # Кнопки масштаба
-        self.zoom_in_btn = QPushButton("🔍+")
-        self.zoom_in_btn.clicked.connect(self.zoom_in)
-        layout.addWidget(self.zoom_in_btn)
-
-        self.zoom_out_btn = QPushButton("🔍-")
+        self.zoom_out_btn = QToolButton()
+        self.zoom_out_btn.setText("🔍-")
+        self.zoom_out_btn.setToolTip("Уменьшить (Ctrl+-)")
         self.zoom_out_btn.clicked.connect(self.zoom_out)
-        layout.addWidget(self.zoom_out_btn)
+        self.toolbar.addWidget(self.zoom_out_btn)
 
-        self.fit_btn = QPushButton("📐 Вписать")
-        self.fit_btn.clicked.connect(self.fit_to_view)
-        layout.addWidget(self.fit_btn)
+        # Слайдер масштаба
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setMinimum(10)  # 0.1
+        self.zoom_slider.setMaximum(500)  # 5.0
+        self.zoom_slider.setValue(int(self.settings.scale * 100))
+        self.zoom_slider.setMaximumWidth(150)
+        self.zoom_slider.setToolTip("Масштаб")
+        self.zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
+        self.toolbar.addWidget(self.zoom_slider)
+
+        # Метка текущего масштаба
+        self.zoom_label = QLabel(".0%")
+        self.zoom_label.setMinimumWidth(60)
+        self.toolbar.addWidget(self.zoom_label)
+
+        self.zoom_in_btn = QToolButton()
+        self.zoom_in_btn.setText("🔍+")
+        self.zoom_in_btn.setToolTip("Увеличить (Ctrl++)")
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        self.toolbar.addWidget(self.zoom_in_btn)
+
+        self.toolbar.addSeparator()
+
+        # Кнопки экспорта
+        self.export_btn = QToolButton()
+        self.export_btn.setText("💾")
+        self.export_btn.setToolTip("Экспорт изображения")
+        self.export_btn.clicked.connect(self.export_image)
+        self.toolbar.addWidget(self.export_btn)
+
+        # Настройка горячих клавиш
+        self._setup_shortcuts()
+
+    def _setup_shortcuts(self):
+        """Настройка горячих клавиш"""
+        from PyQt5.QtGui import QKeySequence
+
+        # Создаем shortcuts для виджета
+        shortcuts = [
+            ("Ctrl+0", self.reset_view),
+            ("Ctrl+F", self.fit_to_view),
+            ("Ctrl++", self.zoom_in),
+            ("Ctrl+=", self.zoom_in),
+            ("Ctrl+-", self.zoom_out),
+            ("Ctrl+E", self.export_image),
+        ]
+
+        for key_seq, callback in shortcuts:
+            shortcut = QShortcut(QKeySequence(key_seq), self)
+            shortcut.activated.connect(callback)
+
+    def _on_zoom_slider_changed(self, value):
+        """Обработчик изменения слайдера масштаба"""
+        new_scale = value / 100.0
+        if abs(new_scale - self.settings.scale) > 0.01:
+            # Центрируем зум относительно центра холста
+            center_pos = QPointF(self.canvas.width() / 2, self.canvas.height() / 2)
+            self.canvas._zoom_at_point(center_pos, new_scale / self.settings.scale)
+            self.update_zoom_display()
+
+    def _on_zoom_changed(self, scale):
+        """Обработчик изменения масштаба"""
+        self.update_zoom_display()
+
+    def _on_pan_changed(self, offset_x, offset_y):
+        """Обработчик изменения позиции"""
+        self.update_status_bar()
+
+    def _on_item_hovered(self, item):
+        """Обработчик наведения на элемент"""
+        self.update_status_bar()
+
+    def update_zoom_display(self):
+        """Обновление отображения текущего масштаба"""
+        self.zoom_slider.blockSignals(True)
+        self.zoom_slider.setValue(int(self.settings.scale * 100))
+        self.zoom_slider.blockSignals(False)
+        self.zoom_label.setText(".0%")
+        self.update_status_bar()
+
+    def update_status_bar(self):
+        """Обновление статусбара с информацией"""
+        if not self.status_bar:
+            return
+
+        messages = []
+
+        # Информация о масштабе
+        messages.append(".0%")
+
+        # Информация о позиции
+        if self.canvas.layout:
+            messages.append(".0f, .0f")
+
+        # Информация о выделенном элементе
+        if self.canvas.hovered_item:
+            item = self.canvas.hovered_item
+            if item.item_type == 'detail' and item.detail:
+                messages.append(f"Деталь: {item.detail.marking}")
+            elif item.item_type == 'remainder':
+                messages.append("Деловой остаток")
+            else:
+                messages.append("Отход")
+
+        # Информация о выделении
+        if self.canvas.selected_items:
+            messages.append(f"Выделено: {len(self.canvas.selected_items)} элементов")
+
+        self.status_bar.showMessage(" | ".join(messages))
+
+    def reset_view(self):
+        """Сброс вида к исходному состоянию"""
+        if not self.optimization_result or not self.optimization_result.layouts:
+            return
+
+        current_layout = self.optimization_result.layouts[self.current_roll_index]
+        roll_width = current_layout.sheet.width
+        roll_height = current_layout.sheet.height
+
+        # Сбрасываем смещение и масштаб
+        self.settings.offset_x = (self.canvas.width() - roll_width) / 2
+        self.settings.offset_y = (self.canvas.height() - roll_height) / 2
+        self.settings.scale = 1.0
+
+        self.canvas.set_settings(self.settings)
+        self.update_zoom_display()
 
     def create_left_panel(self):
         """Создание левой панели с настройками"""
@@ -296,10 +1101,8 @@ class VisualizationTab(QWidget):
         display_group = QGroupBox("Настройки отображения")
         display_layout = QVBoxLayout(display_group)
 
-        self.show_grid_cb = QCheckBox("Показывать сетку")
-        self.show_grid_cb.setChecked(self.settings.show_grid)
-        self.show_grid_cb.stateChanged.connect(self.on_settings_changed)
-        display_layout.addWidget(self.show_grid_cb)
+        # Сетка всегда включена
+        self.settings.show_grid = True
 
         self.show_labels_cb = QCheckBox("Показывать метки")
         self.show_labels_cb.setChecked(self.settings.show_labels)
@@ -311,54 +1114,58 @@ class VisualizationTab(QWidget):
         self.show_dimensions_cb.stateChanged.connect(self.on_settings_changed)
         display_layout.addWidget(self.show_dimensions_cb)
 
+        self.show_minimap_cb = QCheckBox("Показывать мини-карту")
+        self.show_minimap_cb.setChecked(self.settings.show_minimap)
+        self.show_minimap_cb.stateChanged.connect(self.on_settings_changed)
+        display_layout.addWidget(self.show_minimap_cb)
+
+        self.highlight_hover_cb = QCheckBox("Подсвечивать при наведении")
+        self.highlight_hover_cb.setChecked(self.settings.highlight_on_hover)
+        self.highlight_hover_cb.stateChanged.connect(self.on_settings_changed)
+        display_layout.addWidget(self.highlight_hover_cb)
+
         layout.addWidget(display_group)
-
-        # Группа статистики рулона
-        self.stats_group = QGroupBox("Статистика рулона")
-        self.stats_layout = QVBoxLayout(self.stats_group)
-        self.stats_label = QLabel("Нет данных")
-        self.stats_layout.addWidget(self.stats_label)
-        layout.addWidget(self.stats_group)
-
-        # Группа легенды
-        legend_group = QGroupBox("Легенда")
-        legend_layout = QVBoxLayout(legend_group)
-
-        # Синий прямоугольник для деталей
-        legend_layout.addWidget(self.create_legend_item("Детали", QColor(100, 150, 255)))
-        # Зеленый прямоугольник для остатков
-        legend_layout.addWidget(self.create_legend_item("Деловые остатки", QColor(150, 255, 150)))
-        # Красный прямоугольник для отходов
-        legend_layout.addWidget(self.create_legend_item("Отходы", QColor(255, 100, 100)))
-
-        layout.addWidget(legend_group)
 
         layout.addStretch()
 
         return panel
 
-    def create_legend_item(self, text: str, color: QColor) -> QWidget:
-        """Создание элемента легенды"""
-        widget = QWidget()
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(5, 2, 5, 2)
 
-        # Цветной квадратик
-        color_label = QLabel()
-        color_label.setFixedSize(20, 20)
-        color_label.setStyleSheet(f"background-color: {color.name()}; border: 1px solid black;")
-        layout.addWidget(color_label)
 
-        # Текст
-        text_label = QLabel(text)
-        layout.addWidget(text_label)
 
-        layout.addStretch()
-        return widget
+
+
 
     def set_optimization_result(self, result: FiberglassOptimizationResult):
         """Установить результат оптимизации для визуализации"""
         print(f"🔧 DEBUG: set_optimization_result вызван с result={result}")
+        print(f"🔧 DEBUG: Тип результата: {type(result)}")
+
+        if result:
+            print(f"🔧 DEBUG: result.success = {getattr(result, 'success', 'NO ATTR')}")
+            print(f"🔧 DEBUG: result.layouts = {getattr(result, 'layouts', 'NO ATTR')}")
+
+            if hasattr(result, 'layouts') and result.layouts:
+                print(f"🔧 DEBUG: Количество layouts: {len(result.layouts)}")
+                # Проверяем каждый layout
+                for i, layout in enumerate(result.layouts):
+                    print(f"🔧 DEBUG: Layout {i+1}: {getattr(layout, 'sheet', 'NO SHEET')}")
+                    if hasattr(layout, 'placed_items'):
+                        total_items = len(layout.placed_items)
+                        remnants = [item for item in layout.placed_items if getattr(item, 'item_type', '') == 'remainder']
+                        waste = [item for item in layout.placed_items if getattr(item, 'item_type', '') == 'waste']
+                        details = [item for item in layout.placed_items if getattr(item, 'item_type', '') == 'detail']
+
+                        print(f"    - Всего элементов: {total_items}")
+                        print(f"    - Деталей: {len(details)}")
+                        print(f"    - Деловых остатков: {len(remnants)}")
+                        print(f"    - Отходов: {len(waste)}")
+
+                        if remnants:
+                            print(f"    - ДЕЛОВЫЕ ОСТАТКИ:")
+                            for remnant in remnants:
+                                print(f"      * {getattr(remnant, 'width', 0):.0f}x{getattr(remnant, 'height', 0):.0f}мм, тип: {getattr(remnant, 'item_type', 'UNKNOWN')}")
+
         self.optimization_result = result
 
         # Обновляем список рулонов
@@ -371,6 +1178,7 @@ class VisualizationTab(QWidget):
                 print(f"🔧 DEBUG: Добавлен рулон {i+1}: {roll_info}")
             self.roll_combo.setCurrentIndex(0)
             self.update_visualization()
+            self.reset_view()  # Сбрасываем вид при загрузке новых данных
         else:
             # Очищаем визуализацию если результатов нет
             print(f"🔧 DEBUG: Результатов нет или layouts пустые. result={result}")
@@ -378,7 +1186,7 @@ class VisualizationTab(QWidget):
                 print(f"🔧 DEBUG: result.layouts = {getattr(result, 'layouts', 'NO ATTR')}")
             self.canvas.set_layout(None)
             self.roll_combo.addItem("Нет данных для визуализации")
-            self.update_stats(None)
+            self.update_zoom_display()
 
     def clear_visualization(self):
         """Очистить визуализацию"""
@@ -386,13 +1194,14 @@ class VisualizationTab(QWidget):
         self.roll_combo.clear()
         self.roll_combo.addItem("Ожидание результатов оптимизации...")
         self.canvas.set_layout(None)
-        self.update_stats(None)
+        self.update_zoom_display()
 
     def on_roll_changed(self, index: int):
         """Обработчик изменения выбранного рулона"""
         if index >= 0 and self.optimization_result and self.optimization_result.layouts:
             self.current_roll_index = index
             self.update_visualization()
+            self.fit_to_view()  # Автоматически вписываем новый рулон
 
     def update_visualization(self):
         """Обновление визуализации"""
@@ -402,59 +1211,34 @@ class VisualizationTab(QWidget):
         current_layout = self.optimization_result.layouts[self.current_roll_index]
         self.canvas.set_layout(current_layout)
 
-        # Обновляем статистику
-        self.update_stats(current_layout)
-
-    def update_stats(self, layout: FiberglassRollLayout):
-        """Обновление статистики рулона"""
-        if not layout or not hasattr(layout, 'sheet'):
-            self.stats_label.setText("Нет данных для отображения статистики")
-            return
-
-        total_area = layout.sheet.width * layout.sheet.height
-        used_area = sum(item.area for item in layout.placed_items if item.item_type == 'detail')
-        waste_area = sum(item.area for item in layout.placed_items if item.item_type == 'waste')
-        remainder_area = sum(item.area for item in layout.placed_items if item.item_type == 'remainder')
-
-        efficiency = (used_area + remainder_area) / total_area * 100 if total_area > 0 else 0
-        waste_percent = waste_area / total_area * 100 if total_area > 0 else 0
-
-        stats_text = ".0f"".0f"".0f"".0f"".1f"".1f"
-
-        self.stats_label.setText(stats_text)
+        self.update_zoom_display()
 
     def zoom_in(self):
         """Увеличить масштаб"""
-        self.settings.scale = min(self.settings.scale * 1.2, 5.0)
-        self.canvas.set_settings(self.settings)
+        center_pos = QPointF(self.canvas.width() / 2, self.canvas.height() / 2)
+        self.canvas._zoom_at_point(center_pos, self.settings.zoom_step)
 
     def zoom_out(self):
         """Уменьшить масштаб"""
-        self.settings.scale = max(self.settings.scale / 1.2, 0.1)
-        self.canvas.set_settings(self.settings)
+        center_pos = QPointF(self.canvas.width() / 2, self.canvas.height() / 2)
+        self.canvas._zoom_at_point(center_pos, 1.0 / self.settings.zoom_step)
 
     def fit_to_view(self):
         """Вписать раскладку в область просмотра"""
-        if not self.optimization_result or not self.optimization_result.layouts:
-            return
-
-        current_layout = self.optimization_result.layouts[self.current_roll_index]
-        roll_width = current_layout.sheet.width
-        roll_height = current_layout.sheet.height
-
-        # Вычисляем масштаб для вписывания
-        canvas_width = self.canvas.width() - 2 * self.settings.margin
-        canvas_height = self.canvas.height() - 2 * self.settings.margin
-
-        scale_x = canvas_width / roll_width if roll_width > 0 else 1.0
-        scale_y = canvas_height / roll_height if roll_height > 0 else 1.0
-
-        self.settings.scale = min(scale_x, scale_y, 1.0)  # Не увеличиваем больше 1:1
-        self.canvas.set_settings(self.settings)
+        self.canvas.fit_to_view()
+        self.update_zoom_display()
 
     def on_settings_changed(self):
         """Обработчик изменения настроек"""
-        self.settings.show_grid = self.show_grid_cb.isChecked()
+        # Сетка всегда включена
+        self.settings.show_grid = True
         self.settings.show_labels = self.show_labels_cb.isChecked()
         self.settings.show_dimensions = self.show_dimensions_cb.isChecked()
+        self.settings.show_minimap = self.show_minimap_cb.isChecked()
+        self.settings.highlight_on_hover = self.highlight_hover_cb.isChecked()
         self.canvas.set_settings(self.settings)
+
+    def export_image(self):
+        """Экспорт изображения раскладки"""
+        if self.canvas.layout:
+            self.canvas.export_image()

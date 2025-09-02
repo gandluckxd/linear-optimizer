@@ -330,14 +330,14 @@ def fill_optimization_results_table(table: QTableWidget, cut_plans: list):
                 item = table.item(row, col)
                 if item:
                     item.setToolTip(tooltip)
-                    # Цветовая индикация для проблемных планов
+                    # Черно-белая индикация для проблемных планов
                     try:
                         if not is_valid:
-                            # Красный фон для ошибочных планов
-                            item.setBackground(QColor(255, 200, 200))  # Светло-красный
+                            # Темно-серый фон для ошибочных планов
+                            item.setBackground(QColor(200, 200, 200))  # Светло-серый
                         elif used_length > plan.stock_length * 0.95:
-                            # Желтый фон для плотных планов
-                            item.setBackground(QColor(255, 255, 200))  # Светло-желтый
+                            # Средне-серый фон для плотных планов
+                            item.setBackground(QColor(220, 220, 220))  # Очень светло-серый
                     except Exception as color_error:
                         print(f"⚠️ Ошибка установки цвета: {color_error}")
                         # Продолжаем без цвета

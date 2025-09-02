@@ -359,7 +359,7 @@ async def create_optdetail_mos(request: OptDetailMosCreate):
             num=request.num,
             subnum=request.subnum,
             long_al=request.long_al,
-            # Поменяли местами загрузку: izdpart <- partside, partside <- izdpart
+            # Исправлено: поля загружаются корректно
             izdpart=enriched.get("izdpart"),
             partside=enriched.get("partside"),
             modelno=enriched.get("modelno"),
@@ -514,6 +514,9 @@ async def get_fiberglass_details_endpoint(request: FiberglassDetailRequest):
     """
     try:
         details = get_fiberglass_details_by_grorder_mos_id(request.grorder_mos_id)
+        print(f"🔍 API: Возвращаем {len(details)} деталей фибергласса")
+        for i, detail in enumerate(details[:3]):  # Логируем первые 3 детали
+            print(f"🔍 API: Деталь {i+1}: {detail.marking}, izdpart='{detail.izdpart}', partside='{detail.partside}'")
         return details
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка получения деталей фибергласса: {str(e)}")

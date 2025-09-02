@@ -779,11 +779,12 @@ def enrich_optdetail_mos_fields(
                         ug1 = float(cand[1]) if cand[1] is not None else None
                     if ug2 is None:
                         ug2 = float(cand[2]) if cand[2] is not None else None
-                    # Поменяли местами: izdpart <- PARTSIDE, partside <- IZDPART
-                    if (izdpart is None or (isinstance(izdpart, str) and izdpart.strip() == "")) and (cand[4] is not None and str(cand[4]).strip() != ""):
-                        izdpart = cand[4]
-                    if (partside is None or (isinstance(partside, str) and partside.strip() == "")) and (cand[3] is not None and str(cand[3]).strip() != ""):
-                        partside = cand[3]
+                    # Исправлено: правильно присваиваем поля из базы данных
+                    # cand[3] = itd.IZDPART, cand[4] = itd.PARTSIDE
+                    if (izdpart is None or (isinstance(izdpart, str) and izdpart.strip() == "")) and (cand[3] is not None and str(cand[3]).strip() != ""):
+                        izdpart = cand[3]  # itd.IZDPART -> izdpart
+                    if (partside is None or (isinstance(partside, str) and partside.strip() == "")) and (cand[4] is not None and str(cand[4]).strip() != ""):
+                        partside = cand[4]  # itd.PARTSIDE -> partside
                     if modelno is None:
                         modelno = int(cand[5]) if cand[5] is not None else None
                     # HEIGHT/WIDTH: сперва из ORDERITEMS, затем из ITEMSDETAIL
@@ -1907,9 +1908,9 @@ def get_fiberglass_details_by_grorder_mos_id(grorder_mos_id: int) -> List[Fiberg
             itd.thick,
             o.orderid,
             itd.itemsdetailid,
-            od.modelno,
-            od.partside,
-            od.izdpart
+            itd.modelno,
+            itd.partside,
+            itd.izdpart
         FROM grorders gr
         JOIN grorder_uf_values guv ON gr.grorderid = guv.grorderid
         JOIN grordersdetail grd ON grd.grorderid = gr.grorderid
@@ -1919,7 +1920,6 @@ def get_fiberglass_details_by_grorder_mos_id(grorder_mos_id: int) -> List[Fiberg
         JOIN goods g ON g.goodsid = itd.goodsid
         JOIN groupgoods gg ON gg.grgoodsid = itd.grgoodsid
         JOIN groupgoodstypes ggt ON ggt.ggtypeid = gg.ggtypeid
-        LEFT JOIN optdetail_mos od ON oi.orderid = od.orderid AND itd.itemsdetailid = od.itemsdetailid
         WHERE guv.userfieldid = 8
         AND guv.var_str = '{grorder_mos_id}'
         AND gg.ggtypeid = 58
@@ -1933,7 +1933,12 @@ def get_fiberglass_details_by_grorder_mos_id(grorder_mos_id: int) -> List[Fiberg
         cur.execute(sql)
         rows = cur.fetchall()
 
+        print(f"🔍 DEBUG: SQL вернул {len(rows)} строк")
+        if len(rows) > 0:
+            print(f"🔍 DEBUG: Первая строка: {[str(x) for x in rows[0]]}")
+
         for row in rows:
+            print(f"🔍 DEBUG: Обработка строки: partside=row[15]={row[15]}, izdpart=row[16]={row[16]}")
             detail = FiberglassDetail(
                 grorder_mos_id=grorder_mos_id,
                 orderid=int(row[12]) if row[12] else 0,  # o.orderid
@@ -1943,16 +1948,18 @@ def get_fiberglass_details_by_grorder_mos_id(grorder_mos_id: int) -> List[Fiberg
                 width=float(row[9]) if row[9] else 0.0,  # itd.width
                 height=float(row[10]) if row[10] else 0.0,  # itd.height
                 quantity=int(row[8]) if row[8] else 0,  # total_qty
-                modelno=int(row[14]) if row[14] else None,  # od.modelno
-                partside=str(row[15]) if row[15] else None,  # od.partside
-                izdpart=str(row[16]) if row[16] else None,  # od.izdpart
+                modelno=int(row[14]) if row[14] else None,  # itd.modelno
+                partside=str(row[15]) if row[15] else None,  # itd.partside
+                izdpart=str(row[16]) if row[16] else None,  # itd.izdpart
                 goodsid=int(row[7]) if row[7] else 0,  # g.goodsid
-                marking=str(row[6]) if row[6] else ""  # g.marking
+                marking=str(row[6]) if row[6] else "",  # g.marking
+                orderno=str(row[5]) if row[5] else ""  # o.orderno
             )
             details.append(detail)
 
             if ENABLE_LOGGING:
                 print(f"🔍 DB: Загружена деталь фибергласса: {detail.marking}, размер {detail.width}x{detail.height}мм, кол-во {detail.quantity}")
+                print(f"🔍 DB:   partside='{detail.partside}', izdpart='{detail.izdpart}', modelno={detail.modelno}")
 
         con.close()
 

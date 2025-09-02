@@ -370,22 +370,22 @@ class OptimizationSettingsDialog(QDialog):
     def load_settings(self):
         """Загрузка текущих настроек"""
         # Параметры хлыстовой оптимизации
-        self.blade_width.setValue(self.current_settings.get('blade_width', 5))
-        self.min_remainder_length.setValue(self.current_settings.get('min_remainder_length', 300))
-        self.max_waste_percent.setValue(self.current_settings.get('max_waste_percent', 15))
+        self.blade_width.setValue(int(self.current_settings.get('blade_width', 5)))
+        self.min_remainder_length.setValue(int(self.current_settings.get('min_remainder_length', 300)))
+        self.max_waste_percent.setValue(int(self.current_settings.get('max_waste_percent', 15)))
         self.pair_optimization.setChecked(self.current_settings.get('pair_optimization', True))
         self.use_remainders.setChecked(self.current_settings.get('use_remainders', True))
-        self.min_trash_mm.setValue(self.current_settings.get('min_trash_mm', 50))
-        self.begin_indent.setValue(self.current_settings.get('begin_indent', 10))
-        self.end_indent.setValue(self.current_settings.get('end_indent', 10))
+        self.min_trash_mm.setValue(int(self.current_settings.get('min_trash_mm', 50)))
+        self.begin_indent.setValue(int(self.current_settings.get('begin_indent', 10)))
+        self.end_indent.setValue(int(self.current_settings.get('end_indent', 10)))
 
         # Параметры плоскостной оптимизации
-        self.min_remainder_width.setValue(self.current_settings.get('min_remainder_width', 500))
-        self.min_remainder_height.setValue(self.current_settings.get('min_remainder_height', 500))
-        self.planar_cut_width.setValue(self.current_settings.get('planar_cut_width', 1))
-        self.sheet_indent.setValue(self.current_settings.get('sheet_indent', 15))
-        self.remainder_indent.setValue(self.current_settings.get('remainder_indent', 15))
-        self.planar_max_waste_percent.setValue(self.current_settings.get('planar_max_waste_percent', 5))
+        self.min_remainder_width.setValue(int(self.current_settings.get('min_remainder_width', 500)))
+        self.min_remainder_height.setValue(int(self.current_settings.get('min_remainder_height', 500)))
+        self.planar_cut_width.setValue(int(self.current_settings.get('planar_cut_width', 1)))
+        self.sheet_indent.setValue(int(self.current_settings.get('sheet_indent', 15)))
+        self.remainder_indent.setValue(int(self.current_settings.get('remainder_indent', 15)))
+        self.planar_max_waste_percent.setValue(int(self.current_settings.get('planar_max_waste_percent', 5)))
 
     def reset_defaults(self):
         """Сброс к значениям по умолчанию"""
