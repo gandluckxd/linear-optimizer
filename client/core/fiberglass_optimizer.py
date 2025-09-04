@@ -393,22 +393,38 @@ class GuillotineOptimizer:
         if material_sheets and unplaced_details:
             logger.info(f"📋 ЭТАП 2: Размещение {len(unplaced_details)} деталей на цельных листах")
 
-            for sheet in material_sheets:
-                if not unplaced_details:
-                    break
+            # Используем первый лист как шаблон для создания новых
+            sheet_template = material_sheets[0]
+            sheet_index = 0
 
-                logger.info(f"📋 Работаем с листом {sheet.id} ({sheet.width}x{sheet.height})")
-                layout = self._create_sheet_layout_guillotine(sheet, unplaced_details.copy(), 0)
+            # Цикл продолжается, пока есть неразмещенные детали
+            while unplaced_details:
+                sheet_index += 1
+                # Создаем новый лист на основе шаблона
+                current_sheet = copy.deepcopy(sheet_template)
+                current_sheet.id = f"{sheet_template.id}_copy_{sheet_index}"
 
-                if layout:
+                logger.info(f"📋 Работаем с новым листом {current_sheet.id} ({current_sheet.width}x{current_sheet.height})")
+                
+                # Пытаемся создать раскладку для текущего листа
+                layout = self._create_sheet_layout_guillotine(current_sheet, unplaced_details.copy(), 0)
+
+                # Если на листе размещена хотя бы одна деталь
+                if layout and layout.get_placed_details():
                     layouts.append(layout)
-                    # Удаляем размещенные детали из списка
+                    
+                    # Определяем ID размещенных деталей
                     placed_ids = {item.detail.id for item in layout.get_placed_details() if item.detail}
+                    
+                    # Обновляем список неразмещенных деталей
                     unplaced_details = [d for d in unplaced_details if d.id not in placed_ids]
-                    logger.info(f"✅ Лист {sheet.id}: размещено {len(layout.get_placed_details())} деталей")
+                    
+                    logger.info(f"✅ Лист {current_sheet.id}: размещено {len(placed_ids)} деталей. Осталось: {len(unplaced_details)}")
                 else:
-                    logger.info(f"⏭️ Лист {sheet.id} пропущен")
-
+                    # Если на новом листе не удалось разместить ни одной детали, прерываем цикл
+                    logger.warning(f"⚠️ Не удалось разместить детали на новом листе {current_sheet.id}. Прерываем, чтобы избежать бесконечного цикла.")
+                    break
+        
         return layouts, unplaced_details
 
     def _create_sheet_layout_guillotine(self, sheet: Sheet, details: List[Detail], iteration: int) -> Optional[SheetLayout]:
@@ -478,6 +494,9 @@ class GuillotineOptimizer:
 
         # КРИТИЧЕСКИ ВАЖНО: заполняем ВСЕ оставшиеся области
         self._fill_remaining_areas(layout, free_areas)
+
+        # Обновляем площади после добавления всех элементов
+        layout._update_areas()
 
         # Проверка покрытия
         coverage = layout.get_coverage_percent()
@@ -565,15 +584,25 @@ class GuillotineOptimizer:
         item_type = "remnant" if is_remnant else "waste"
         logger.debug(f"🔧 ОБЛАСТЬ: {area.width:.0f}x{area.height:.0f} - {'ДЕЛОВОЙ ОСТАТОК' if is_remnant else 'ОТХОД'}")
 
+        # Создаем фиктивный объект Detail для хранения артикула материала
+        sheet_detail = Detail(
+            id=f"{item_type}_{layout.sheet.id}",
+            width=area.width,
+            height=area.height,
+            material=layout.sheet.material,
+            marking=layout.sheet.marking,
+            goodsid=layout.sheet.goodsid
+        )
+
         placed_item = PlacedItem(
             x=area.x,
             y=area.y,
             width=area.width,
             height=area.height,
             item_type=item_type,
-                    detail=None,
-                    is_rotated=False
-                )
+            detail=sheet_detail,
+            is_rotated=False
+        )
         layout.placed_items.append(placed_item)
 
     def _calculate_final_result(self, layouts: List[SheetLayout], unplaced: List[Detail], start_time: float) -> OptimizationResult:
@@ -710,7 +739,8 @@ def optimize(details: List[dict], materials: List[dict], remainders: List[dict],
                     can_rotate=True,
                     priority=int(detail_data.get('priority', 0)),
                     oi_name=str(detail_data.get('oi_name', '')),
-                    goodsid=goodsid  # Передаем goodsid в деталь
+                    goodsid=goodsid,  # Передаем goodsid в деталь
+                    marking=str(detail_data.get('g_marking', '')) # Сохраняем артикул
                 )
 
                 # ДОБАВЛЕНО: Передаем новые поля для XML генерации
@@ -738,7 +768,8 @@ def optimize(details: List[dict], materials: List[dict], remainders: List[dict],
                     material=str(material_data.get('g_marking', '')),
                     cost_per_unit=float(material_data.get('cost', 0)),
                     is_remainder=False,
-                    goodsid=int(material_data.get('goodsid', 0)) if material_data.get('goodsid') else None
+                    goodsid=int(material_data.get('goodsid', 0)) if material_data.get('goodsid') else None,
+                    marking=str(material_data.get('g_marking', '')) # Сохраняем артикул
                 )
                 if sheet.width > 0 and sheet.height > 0 and sheet.material:
                     sheets.append(sheet)
@@ -769,7 +800,8 @@ def optimize(details: List[dict], materials: List[dict], remainders: List[dict],
                         cost_per_unit=float(remainder_data.get('cost', 0)),
                         is_remainder=True,
                         remainder_id=str(remainder_data.get('id', '')),
-                        goodsid=goodsid  # Передаем goodsid в остаток
+                        goodsid=goodsid,  # Передаем goodsid в остаток
+                        marking=str(remainder_data.get('g_marking', '')) # Сохраняем артикул
                     )
                     if sheet.width > 0 and sheet.height > 0 and sheet.material:
                         sheets.append(sheet)

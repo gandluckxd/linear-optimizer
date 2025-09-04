@@ -8,15 +8,17 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QComboBox,
     QScrollArea, QFrame, QSplitter, QGroupBox,
     QSlider, QCheckBox, QToolBar,
-    QToolButton, QStatusBar, QMenu, QShortcut,
-    QGraphicsTextItem
+    QToolButton, QMenu, QShortcut,
+    QGraphicsTextItem, QTableWidget
 )
-from PyQt5.QtCore import Qt, QPointF, pyqtSignal, QRectF
+from PyQt5.QtCore import Qt, QPointF, pyqtSignal
 from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPixmap
 from typing import List, Optional
 from dataclasses import dataclass
+from collections import Counter
 
 from core.models import FiberglassOptimizationResult, FiberglassRollLayout, PlacedFiberglassItem
+from gui.table_widgets import setup_table_columns, _create_numeric_item, _create_text_item
 
 
 @dataclass
@@ -125,7 +127,6 @@ class FiberglassCanvas(QFrame):
             return  # Масштаб не изменился существенно
 
         # Вычисляем смещение, чтобы зум был относительно курсора
-        scale_ratio = new_scale / self.settings.scale
 
         # Преобразуем позицию курсора в координаты раскладки
         layout_x = (center_pos.x() - self.settings.offset_x) / self.settings.scale
@@ -885,9 +886,6 @@ class VisualizationTab(QWidget):
         self.current_roll_index = 0
         self.settings = VisualizationSettings()
 
-        # Сигналы для обновления статусбара
-        self.status_update_requested = None  # Будет установлен в init
-
         self.init_ui()
 
     def init_ui(self):
@@ -920,12 +918,6 @@ class VisualizationTab(QWidget):
         self.canvas.pan_changed.connect(self._on_pan_changed)
         self.canvas.item_hovered.connect(self._on_item_hovered)
 
-        # Статус бар для отображения информации
-        self.status_bar = QStatusBar()
-        layout.addWidget(self.status_bar)
-
-        self.update_status_bar()
-
     def create_toolbar(self):
         """Создание панели инструментов с улучшенными элементами управления"""
         self.toolbar = QToolBar("Визуализация")
@@ -942,12 +934,6 @@ class VisualizationTab(QWidget):
         self.toolbar.addSeparator()
 
         # Кнопки навигации
-        self.home_btn = QToolButton()
-        self.home_btn.setText("🏠")
-        self.home_btn.setToolTip("Сбросить вид (Ctrl+0)")
-        self.home_btn.clicked.connect(self.reset_view)
-        self.toolbar.addWidget(self.home_btn)
-
         self.fit_btn = QToolButton()
         self.fit_btn.setText("📐")
         self.fit_btn.setToolTip("Вписать в окно (Ctrl+F)")
@@ -987,12 +973,6 @@ class VisualizationTab(QWidget):
         self.toolbar.addSeparator()
 
         # Кнопки экспорта
-        self.export_btn = QToolButton()
-        self.export_btn.setText("💾")
-        self.export_btn.setToolTip("Экспорт текущего рулона")
-        self.export_btn.clicked.connect(self.export_image)
-        self.toolbar.addWidget(self.export_btn)
-
         self.export_all_pdf_btn = QToolButton()
         self.export_all_pdf_btn.setText("📄")
         self.export_all_pdf_btn.setToolTip("Экспорт всех рулонов в PDF")
@@ -1008,12 +988,10 @@ class VisualizationTab(QWidget):
 
         # Создаем shortcuts для виджета
         shortcuts = [
-            ("Ctrl+0", self.reset_view),
             ("Ctrl+F", self.fit_to_view),
             ("Ctrl++", self.zoom_in),
             ("Ctrl+=", self.zoom_in),
             ("Ctrl+-", self.zoom_out),
-            ("Ctrl+E", self.export_image),
         ]
 
         for key_seq, callback in shortcuts:
@@ -1035,69 +1013,25 @@ class VisualizationTab(QWidget):
 
     def _on_pan_changed(self, offset_x, offset_y):
         """Обработчик изменения позиции"""
-        self.update_status_bar()
+        pass
 
     def _on_item_hovered(self, item):
         """Обработчик наведения на элемент"""
-        self.update_status_bar()
+        pass
 
     def update_zoom_display(self):
         """Обновление отображения текущего масштаба"""
         self.zoom_slider.blockSignals(True)
         self.zoom_slider.setValue(int(self.settings.scale * 100))
         self.zoom_slider.blockSignals(False)
-        self.zoom_label.setText(".0%")
-        self.update_status_bar()
+        self.zoom_label.setText(f"{self.settings.scale:.0%}")
 
     def update_status_bar(self):
         """Обновление статусбара с информацией"""
-        if not self.status_bar:
-            return
-
-        messages = []
-
-        # Информация о масштабе
-        messages.append(".0%")
-
-        # Информация о позиции
-        if self.canvas.layout:
-            messages.append(".0f, .0f")
-
-        # Информация о выделенном элементе
-        if self.canvas.hovered_item:
-            item = self.canvas.hovered_item
-            if item.item_type == 'detail' and item.detail:
-                messages.append(f"Деталь: {item.detail.marking}")
-            elif item.item_type == 'remainder':
-                messages.append("Деловой остаток")
-            else:
-                messages.append("Отход")
-
-        # Информация о выделении
-        if self.canvas.selected_items:
-            messages.append(f"Выделено: {len(self.canvas.selected_items)} элементов")
-
-        self.status_bar.showMessage(" | ".join(messages))
-
-    def reset_view(self):
-        """Сброс вида к исходному состоянию"""
-        if not self.optimization_result or not self.optimization_result.layouts:
-            return
-
-        current_layout = self.optimization_result.layouts[self.current_roll_index]
-        roll_width = current_layout.sheet.width
-        roll_height = current_layout.sheet.height
-
-        # Сбрасываем смещение и масштаб
-        self.settings.offset_x = (self.canvas.width() - roll_width) / 2
-        self.settings.offset_y = (self.canvas.height() - roll_height) / 2
-        self.settings.scale = 1.0
-
-        self.canvas.set_settings(self.settings)
-        self.update_zoom_display()
+        pass
 
     def create_left_panel(self):
-        """Создание левой панели с настройками"""
+        """Создание левой панели с настройками, статистикой и таблицами"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
 
@@ -1130,67 +1064,57 @@ class VisualizationTab(QWidget):
 
         layout.addWidget(display_group)
 
+        # Группа статистики
+        stats_group = QGroupBox("Статистика раскроя")
+        stats_layout = QVBoxLayout(stats_group)
+        self.placed_details_label = QLabel("Размещено деталей: 0 / 0")
+        self.waste_area_label = QLabel("Площадь отходов: 0.00 м²")
+        self.waste_count_label = QLabel("Количество отходов: 0 шт")
+        self.waste_percent_label = QLabel("Процент отходов: 0.0%")
+        stats_layout.addWidget(self.placed_details_label)
+        stats_layout.addWidget(self.waste_area_label)
+        stats_layout.addWidget(self.waste_count_label)
+        stats_layout.addWidget(self.waste_percent_label)
+        layout.addWidget(stats_group)
+
+        # Таблица деловых остатков
+        remnants_group = QGroupBox("Деловые остатки")
+        remnants_layout = QVBoxLayout(remnants_group)
+        self.remnants_table = QTableWidget()
+        setup_table_columns(self.remnants_table, ["Артикул", "Ширина", "Высота", "Кол-во"])
+        remnants_layout.addWidget(self.remnants_table)
+        layout.addWidget(remnants_group)
+
+        # Таблица отходов
+        waste_group = QGroupBox("Отходы")
+        waste_layout = QVBoxLayout(waste_group)
+        self.waste_table = QTableWidget()
+        setup_table_columns(self.waste_table, ["Артикул", "Ширина", "Высота", "Кол-во"])
+        waste_layout.addWidget(self.waste_table)
+        layout.addWidget(waste_group)
+
+
         layout.addStretch()
-
         return panel
-
-
-
-
-
-
 
     def set_optimization_result(self, result: FiberglassOptimizationResult):
         """Установить результат оптимизации для визуализации"""
-        print(f"🔧 DEBUG: set_optimization_result вызван с result={result}")
-        print(f"🔧 DEBUG: Тип результата: {type(result)}")
-
-        if result:
-            print(f"🔧 DEBUG: result.success = {getattr(result, 'success', 'NO ATTR')}")
-            print(f"🔧 DEBUG: result.layouts = {getattr(result, 'layouts', 'NO ATTR')}")
-
-            if hasattr(result, 'layouts') and result.layouts:
-                print(f"🔧 DEBUG: Количество layouts: {len(result.layouts)}")
-                # Проверяем каждый layout
-                for i, layout in enumerate(result.layouts):
-                    print(f"🔧 DEBUG: Layout {i+1}: {getattr(layout, 'sheet', 'NO SHEET')}")
-                    if hasattr(layout, 'placed_items'):
-                        total_items = len(layout.placed_items)
-                        remnants = [item for item in layout.placed_items if getattr(item, 'item_type', '') == 'remainder']
-                        waste = [item for item in layout.placed_items if getattr(item, 'item_type', '') == 'waste']
-                        details = [item for item in layout.placed_items if getattr(item, 'item_type', '') == 'detail']
-
-                        print(f"    - Всего элементов: {total_items}")
-                        print(f"    - Деталей: {len(details)}")
-                        print(f"    - Деловых остатков: {len(remnants)}")
-                        print(f"    - Отходов: {len(waste)}")
-
-                        if remnants:
-                            print(f"    - ДЕЛОВЫЕ ОСТАТКИ:")
-                            for remnant in remnants:
-                                print(f"      * {getattr(remnant, 'width', 0):.0f}x{getattr(remnant, 'height', 0):.0f}мм, тип: {getattr(remnant, 'item_type', 'UNKNOWN')}")
-
         self.optimization_result = result
 
-        # Обновляем список рулонов
         self.roll_combo.clear()
         if result and hasattr(result, 'layouts') and result.layouts:
-            print(f"🔧 DEBUG: Найдено {len(result.layouts)} рулонов")
             for i, layout in enumerate(result.layouts):
                 roll_info = f"Рулон {i+1}: {layout.sheet.width:.0f}×{layout.sheet.height:.0f}мм"
                 self.roll_combo.addItem(roll_info)
-                print(f"🔧 DEBUG: Добавлен рулон {i+1}: {roll_info}")
             self.roll_combo.setCurrentIndex(0)
             self.update_visualization()
-            self.reset_view()  # Сбрасываем вид при загрузке новых данных
+            self.fit_to_view()
+            self.update_statistics_and_tables()
         else:
-            # Очищаем визуализацию если результатов нет
-            print(f"🔧 DEBUG: Результатов нет или layouts пустые. result={result}")
-            if result:
-                print(f"🔧 DEBUG: result.layouts = {getattr(result, 'layouts', 'NO ATTR')}")
             self.canvas.set_layout(None)
             self.roll_combo.addItem("Нет данных для визуализации")
             self.update_zoom_display()
+            self.clear_statistics_and_tables()
 
     def clear_visualization(self):
         """Очистить визуализацию"""
@@ -1199,6 +1123,70 @@ class VisualizationTab(QWidget):
         self.roll_combo.addItem("Ожидание результатов оптимизации...")
         self.canvas.set_layout(None)
         self.update_zoom_display()
+        self.clear_statistics_and_tables()
+
+    def update_statistics_and_tables(self):
+        """Обновление статистики и таблиц с деловыми остатками и отходами"""
+        if not self.optimization_result:
+            self.clear_statistics_and_tables()
+            return
+
+        # Статистика
+        total_details = sum(d.quantity for d in self.optimization_result.unplaced_details)
+        placed_details = 0
+        total_waste_area = 0
+        all_remnants = []
+        all_waste = []
+
+        for layout in self.optimization_result.layouts:
+            placed_details += len([item for item in layout.placed_items if item.item_type == 'detail'])
+            total_waste_area += sum(item.area for item in layout.get_waste())
+            all_remnants.extend(layout.get_remnants())
+            all_waste.extend(layout.get_waste())
+
+        total_details += placed_details
+        
+        self.placed_details_label.setText(f"Размещено деталей: {placed_details} / {total_details}")
+        self.waste_area_label.setText(f"Площадь отходов: {total_waste_area / 1_000_000:.2f} м²")
+        self.waste_count_label.setText(f"Количество отходов: {len(all_waste)} шт")
+        
+        total_sheet_area = sum(layout.sheet.area for layout in self.optimization_result.layouts)
+        waste_percent = (total_waste_area / total_sheet_area * 100) if total_sheet_area > 0 else 0
+        self.waste_percent_label.setText(f"Процент отходов: {waste_percent:.1f}%")
+
+        # Заполнение таблиц
+        self._populate_item_table(self.remnants_table, all_remnants)
+        self._populate_item_table(self.waste_table, all_waste)
+
+    def _populate_item_table(self, table: QTableWidget, items: List[PlacedFiberglassItem]):
+        """Заполнение таблицы деловыми остатками или отходами."""
+        table.setRowCount(0)
+        
+        # Группируем элементы по размеру и артикулу
+        item_counts = Counter((
+            item.detail.marking if item.detail else "N/A", 
+            int(item.width), 
+            int(item.height)
+        ) for item in items)
+
+        for (marking, width, height), count in item_counts.items():
+            row = table.rowCount()
+            table.insertRow(row)
+            table.setItem(row, 0, _create_text_item(marking))
+            table.setItem(row, 1, _create_numeric_item(width))
+            table.setItem(row, 2, _create_numeric_item(height))
+            table.setItem(row, 3, _create_numeric_item(count))
+        
+        table.resizeColumnsToContents()
+
+    def clear_statistics_and_tables(self):
+        """Очистка статистики и таблиц"""
+        self.placed_details_label.setText("Размещено деталей: 0 / 0")
+        self.waste_area_label.setText("Площадь отходов: 0.00 м²")
+        self.waste_count_label.setText("Количество отходов: 0 шт")
+        self.waste_percent_label.setText("Процент отходов: 0.0%")
+        self.remnants_table.setRowCount(0)
+        self.waste_table.setRowCount(0)
 
     def on_roll_changed(self, index: int):
         """Обработчик изменения выбранного рулона"""
@@ -1242,11 +1230,6 @@ class VisualizationTab(QWidget):
         self.settings.highlight_on_hover = self.highlight_hover_cb.isChecked()
         self.canvas.set_settings(self.settings)
 
-    def export_image(self):
-        """Экспорт изображения раскладки"""
-        if self.canvas.layout:
-            self.canvas.export_image()
-
     def export_all_to_pdf(self):
         """Экспорт всех рулонов в один PDF-файл с разбивкой по страницам."""
         if not self.optimization_result or not self.optimization_result.layouts:
@@ -1263,7 +1246,7 @@ class VisualizationTab(QWidget):
             return
 
         try:
-            from PyQt5.QtGui import QPdfWriter, QPainter, QPen, QBrush, QColor, QFont
+            from PyQt5.QtGui import QPdfWriter, QPainter, QPen, QFont
             from PyQt5.QtCore import QRectF, Qt
 
             pdf_writer = QPdfWriter(filename)
@@ -1289,8 +1272,9 @@ class VisualizationTab(QWidget):
             is_first_page = True
 
             for i, layout in enumerate(self.optimization_result.layouts):
-                roll_width = layout.sheet.width
-                roll_height = layout.sheet.height
+                sheet_info = layout.sheet
+                roll_width = sheet_info.width
+                roll_height = sheet_info.height
                 
                 # Масштаб, чтобы вписать рулон по ширине страницы
                 scale = drawable_width / roll_width if roll_width > 0 else 1.0
@@ -1306,7 +1290,7 @@ class VisualizationTab(QWidget):
                     # -- Рисуем заголовок --
                     painter.setFont(header_font)
                     painter.setPen(Qt.black)
-                    header_text = f"Рулон {i+1} ({layout.sheet.width:.0f} x {layout.sheet.height:.0f} мм) - Стр. {page_num_for_roll}"
+                    header_text = f"Рулон {i+1} ({sheet_info.width} x {sheet_info.height}) - Стр. {page_num_for_roll}"
                     painter.drawText(QRectF(margin_pts, margin_pts, drawable_width, header_height), Qt.AlignCenter, header_text)
 
                     # -- Рисуем раскладку --
@@ -1358,7 +1342,7 @@ class VisualizationTab(QWidget):
 
     def _draw_pdf_item(self, painter, item, y_offset_on_roll, scale, font):
         """Вспомогательная функция для отрисовки одного элемента в PDF."""
-        from PyQt5.QtGui import QPen, QBrush, QColor, QFont
+        from PyQt5.QtGui import QPen
         from PyQt5.QtCore import QRectF, Qt
 
         # Координаты элемента относительно видимой части рулона
