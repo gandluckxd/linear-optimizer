@@ -5,18 +5,16 @@
 """
 
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
-    QScrollArea, QFrame, QSplitter, QGroupBox, QPushButton,
-    QSlider, QCheckBox, QSpinBox, QFormLayout, QToolBar,
-    QToolButton, QStatusBar, QMenu, QAction, QShortcut,
+    QWidget, QVBoxLayout, QLabel, QComboBox,
+    QScrollArea, QFrame, QSplitter, QGroupBox,
+    QSlider, QCheckBox, QToolBar,
+    QToolButton, QStatusBar, QMenu, QShortcut,
     QGraphicsTextItem
 )
-from PyQt5.QtCore import Qt, QRectF, QPointF, QTimer, QEvent, pyqtSignal
-from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QFont, QTransform, QCursor, QPixmap, QIcon
-import math
-from typing import List, Optional, Dict, Any, Tuple
+from PyQt5.QtCore import Qt, QPointF, pyqtSignal, QRectF
+from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPixmap
+from typing import List, Optional
 from dataclasses import dataclass
-import os
 
 from core.models import FiberglassOptimizationResult, FiberglassRollLayout, PlacedFiberglassItem
 
@@ -991,9 +989,15 @@ class VisualizationTab(QWidget):
         # Кнопки экспорта
         self.export_btn = QToolButton()
         self.export_btn.setText("💾")
-        self.export_btn.setToolTip("Экспорт изображения")
+        self.export_btn.setToolTip("Экспорт текущего рулона")
         self.export_btn.clicked.connect(self.export_image)
         self.toolbar.addWidget(self.export_btn)
+
+        self.export_all_pdf_btn = QToolButton()
+        self.export_all_pdf_btn.setText("📄")
+        self.export_all_pdf_btn.setToolTip("Экспорт всех рулонов в PDF")
+        self.export_all_pdf_btn.clicked.connect(self.export_all_to_pdf)
+        self.toolbar.addWidget(self.export_all_pdf_btn)
 
         # Настройка горячих клавиш
         self._setup_shortcuts()
@@ -1242,3 +1246,167 @@ class VisualizationTab(QWidget):
         """Экспорт изображения раскладки"""
         if self.canvas.layout:
             self.canvas.export_image()
+
+    def export_all_to_pdf(self):
+        """Экспорт всех рулонов в один PDF-файл с разбивкой по страницам."""
+        if not self.optimization_result or not self.optimization_result.layouts:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Экспорт в PDF", "Нет данных для экспорта.")
+            return
+
+        from PyQt5.QtWidgets import QFileDialog
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Экспорт всех рулонов в PDF", "", "PDF файлы (*.pdf)"
+        )
+
+        if not filename:
+            return
+
+        try:
+            from PyQt5.QtGui import QPdfWriter, QPainter, QPen, QBrush, QColor, QFont
+            from PyQt5.QtCore import QRectF, Qt
+
+            pdf_writer = QPdfWriter(filename)
+            pdf_writer.setPageSize(QPdfWriter.A4)
+            pdf_writer.setResolution(300)  # 300 DPI
+
+            painter = QPainter(pdf_writer)
+            painter.setRenderHint(QPainter.Antialiasing)
+
+            # Размеры страницы A4 в точках при 300 DPI
+            page_width_pts = pdf_writer.width()
+            page_height_pts = pdf_writer.height()
+            margin_pts = 50  # Отступ в точках
+
+            drawable_width = page_width_pts - 2 * margin_pts
+            drawable_height = page_height_pts - 2 * margin_pts
+            
+            header_font = QFont("Arial", 12)
+            item_font = QFont("Arial", 8)
+            painter.setFont(header_font)
+            header_height = painter.fontMetrics().height() + 20
+
+            is_first_page = True
+
+            for i, layout in enumerate(self.optimization_result.layouts):
+                roll_width = layout.sheet.width
+                roll_height = layout.sheet.height
+                
+                # Масштаб, чтобы вписать рулон по ширине страницы
+                scale = drawable_width / roll_width if roll_width > 0 else 1.0
+                
+                y_offset_on_roll = 0  # Смещение по высоте рулона, которое уже нарисовано
+                page_num_for_roll = 1
+
+                while y_offset_on_roll < roll_height:
+                    if not is_first_page:
+                        pdf_writer.newPage()
+                    is_first_page = False
+
+                    # -- Рисуем заголовок --
+                    painter.setFont(header_font)
+                    painter.setPen(Qt.black)
+                    header_text = f"Рулон {i+1} ({layout.sheet.width:.0f} x {layout.sheet.height:.0f} мм) - Стр. {page_num_for_roll}"
+                    painter.drawText(QRectF(margin_pts, margin_pts, drawable_width, header_height), Qt.AlignCenter, header_text)
+
+                    # -- Рисуем раскладку --
+                    
+                    # Сохраняем состояние painter'а
+                    painter.save()
+                    
+                    # Смещаем начало координат для рисования рулона
+                    painter.translate(margin_pts, margin_pts + header_height)
+                    
+                    # Определяем, какая часть рулона помещается на этой странице
+                    remaining_roll_height = roll_height - y_offset_on_roll
+                    drawable_roll_height_on_page = (drawable_height - header_height) / scale
+                    
+                    height_to_draw_on_roll = min(remaining_roll_height, drawable_roll_height_on_page)
+                    
+                    # Устанавливаем "окно" просмотра для painter'a, чтобы обрезать все, что вне
+                    clip_rect = QRectF(0, 0, drawable_width, height_to_draw_on_roll * scale)
+                    painter.setClipRect(clip_rect)
+
+                    # Рисуем рамку видимой части рулона
+                    painter.setPen(QPen(Qt.black, 2))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawRect(QRectF(0, 0, roll_width * scale, height_to_draw_on_roll * scale))
+
+                    # Рисуем элементы
+                    for item in layout.placed_items:
+                        # Проверяем, попадает ли элемент в видимую область по Y
+                        if (item.y + item.height > y_offset_on_roll and
+                            item.y < y_offset_on_roll + height_to_draw_on_roll):
+                            
+                            self._draw_pdf_item(painter, item, y_offset_on_roll, scale, item_font)
+
+                    # Восстанавливаем состояние painter'а
+                    painter.restore()
+
+                    y_offset_on_roll += height_to_draw_on_roll
+                    page_num_for_roll += 1
+
+            painter.end()
+            
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Экспорт в PDF", f"Все рулоны успешно экспортированы в {filename}")
+
+        except Exception as e:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Ошибка экспорта PDF", f"Не удалось создать PDF файл:\n{str(e)}")
+
+
+    def _draw_pdf_item(self, painter, item, y_offset_on_roll, scale, font):
+        """Вспомогательная функция для отрисовки одного элемента в PDF."""
+        from PyQt5.QtGui import QPen, QBrush, QColor, QFont
+        from PyQt5.QtCore import QRectF, Qt
+
+        # Координаты элемента относительно видимой части рулона
+        item_x_on_page = item.x * scale
+        item_y_on_page = (item.y - y_offset_on_roll) * scale
+        item_width_scaled = item.width * scale
+        item_height_scaled = item.height * scale
+        
+        rect = QRectF(item_x_on_page, item_y_on_page, item_width_scaled, item_height_scaled)
+
+        # Настройка кисти и пера
+        if item.item_type == 'detail':
+            border_color = QColor(100, 100, 100)
+        elif item.item_type == 'remainder':
+            border_color = QColor(80, 80, 80)
+        else: # waste
+            border_color = QColor(50, 50, 50)
+        
+        painter.setPen(QPen(border_color, 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(rect)
+
+        # -- Рисуем текст --
+        text_parts = []
+        if item.item_type == 'detail' and item.detail:
+            if hasattr(item.detail, 'orderno') and item.detail.orderno:
+                text_parts.append(str(item.detail.orderno))
+            
+            line2_parts = []
+            if hasattr(item.detail, 'item_name') and item.detail.item_name:
+                line2_parts.append(str(item.detail.item_name))
+            if hasattr(item.detail, 'izdpart') and item.detail.izdpart:
+                line2_parts.append(str(item.detail.izdpart))
+            if line2_parts:
+                text_parts.append("/".join(line2_parts))
+            
+            text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
+            if item.is_rotated:
+                text_parts[-1] += " ↻"
+        elif item.item_type == 'remainder':
+            text_parts.append("ОСТ")
+            text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
+        elif item.item_type == 'waste':
+            text_parts.append("ОТХ")
+            text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
+
+        if text_parts:
+            painter.setPen(Qt.black)
+            painter.setFont(font)
+            # Простое центрирование текста
+            painter.drawText(rect, Qt.AlignCenter, "\n".join(text_parts))
