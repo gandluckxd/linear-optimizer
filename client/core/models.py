@@ -73,11 +73,14 @@ class Piece:
     element_name: str
     order_id: int
     piece_id: str  # Уникальный идентификатор детали
+    orderitemsid: Optional[int] = None # ID позиции заказа
+    izdpart: Optional[str] = None      # Номер части изделия
     
     # Состояние размещения
     placed: bool = False
     placed_in_stock_id: Optional[str] = None
     placed_in_plan_index: Optional[int] = None
+    cell_number: Optional[int] = None
     
     def __post_init__(self):
         if not self.piece_id:
@@ -93,6 +96,8 @@ class Profile:
     length: float  # Длина в мм
     quantity: int  # Количество штук
     color: str = ""  # Цвет для визуализации
+    orderitemsid: Optional[int] = None # ID позиции заказа
+    izdpart: Optional[str] = None      # Номер части изделия
     
     def __post_init__(self):
         # Копируем количество для отслеживания оставшихся

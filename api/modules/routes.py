@@ -31,7 +31,8 @@ from utils.db_functions import (
     get_grorder_ids_by_grorders_mos_id,
     delete_grorders_mos,
     delete_optimized_mos_by_grorders_mos_id,
-    distribute_cell_numbers
+    distribute_cell_numbers,
+    insert_optdetail_mos_bulk
 )
 from utils.db_functions import (
     load_fiberglass_data,
@@ -381,6 +382,30 @@ async def create_optdetail_mos(request: OptDetailMosCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/optdetail-mos/bulk", response_model=List[OptDetailMos])
+async def create_optdetail_mos_bulk(requests: List[OptDetailMosCreate]):
+    """
+    Массово создать записи в таблице OPTDETAIL_MOS.
+    """
+    try:
+        if not requests:
+            return []
+            
+        print(f"🔧 API: Начало массовой вставки {len(requests)} записей в OPTDETAIL_MOS.")
+        
+        # Преобразуем Pydantic модели в словари
+        details_to_insert = [r.dict() for r in requests]
+        
+        created_records = insert_optdetail_mos_bulk(details_to_insert)
+        
+        print(f"✅ API: Массовая вставка завершена, создано {len(created_records)} записей.")
+        return created_records
+        
+    except Exception as e:
+        print(f"❌ API: Ошибка массового создания записей в OPTDETAIL_MOS: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.delete("/grorders-mos/{grorders_mos_id}")
 async def delete_grorders_mos_endpoint(grorders_mos_id: int):
     """
@@ -450,9 +475,14 @@ async def distribute_cell_numbers_endpoint(request: dict):
         if not grorder_mos_id:
             raise HTTPException(status_code=400, detail="grorder_mos_id обязателен")
         
-        print(f"🔧 API: distribute_cell_numbers вызван для grorder_mos_id={grorder_mos_id}")
+        # Получаем опциональную карту ячеек
+        cell_map = request.get('cell_map')
         
-        result = distribute_cell_numbers(grorder_mos_id)
+        print(f"🔧 API: distribute_cell_numbers вызван для grorder_mos_id={grorder_mos_id}")
+        if cell_map:
+            print(f"🔧 API: Получена карта ячеек (cell_map) с {len(cell_map)} записями.")
+        
+        result = distribute_cell_numbers(grorder_mos_id, cell_map=cell_map)
         
         if result["success"]:
             print(f"✅ API: Распределение ячеек выполнено успешно: обработано {result['processed_items']} проемов")

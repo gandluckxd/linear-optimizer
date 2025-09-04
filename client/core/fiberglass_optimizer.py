@@ -231,13 +231,14 @@ class GuillotineOptimizer:
         if self.progress_callback:
             self.progress_callback(progress)
 
-    def optimize(self, details: List[Detail], sheets: List[Sheet]) -> OptimizationResult:
+    def optimize(self, details: List[Detail], sheets: List[Sheet], cell_map: Dict[str, int] = None) -> OptimizationResult:
         """
         Главный метод оптимизации
 
         Args:
             details: Список деталей для раскроя
             sheets: Список доступных листов
+            cell_map (Dict[str, int], optional): Предварительно сгенерированная карта ячеек.
 
         Returns:
             OptimizationResult: Результат оптимизации
@@ -279,7 +280,7 @@ class GuillotineOptimizer:
             prepared_details = self._prepare_details(details)
 
             # Распределение ячеек
-            self._distribute_cells(prepared_details)
+            self._assign_cells_from_map(prepared_details, cell_map)
 
             prepared_sheets = self._prepare_sheets(sheets)
 
@@ -512,46 +513,22 @@ class GuillotineOptimizer:
 
         return layout
 
-    def _distribute_cells(self, details: List[Detail]):
-        """Распределяет номера ячеек по уникальным проемам."""
-        logger.info("🏠 Распределение номеров ячеек...")
-        
-        unique_openings = {}
-        
-        # Группируем детали по уникальному проему.
-        # Проем определяется по 'orderno', 'item_name', 'izdpart'
+    def _assign_cells_from_map(self, details: List[Detail], cell_map: Optional[Dict[str, int]]):
+        """Присваивает номера ячеек деталям из предоставленной карты."""
+        if not cell_map:
+            logger.warning("⚠️ Карта ячеек не предоставлена, ячейки не будут назначены.")
+            return
+
+        logger.info("🏠 Присвоение номеров ячеек из карты...")
+        assigned_count = 0
         for detail in details:
-            # Используем combinatie van orderno, item_name, and izdpart als unieke sleutel
-            # voor de opening. Dit is meer betrouwbaar dan alleen de grootte.
-            key = (detail.orderno, detail.item_name, detail.izdpart)
-            if key not in unique_openings:
-                unique_openings[key] = {
-                    "details": [],
-                    "width": detail.width,
-                    "height": detail.height,
-                }
-            unique_openings[key]["details"].append(detail)
-            
-        # Сортируем проемы для последовательной нумерации (например, по размеру)
-        sorted_keys = sorted(
-            unique_openings.keys(), 
-            key=lambda k: (unique_openings[k]['width'] * unique_openings[k]['height']), 
-            reverse=True
-        )
-        
-        cell_counter = 1
-        for key in sorted_keys:
-            opening_data = unique_openings[key]
-            for detail in opening_data["details"]:
-                detail.cell_number = cell_counter
-            
-            logger.info(
-                f"  - Ячейка {cell_counter}: {opening_data['width']}x{opening_data['height']}мм "
-                f"({key[1]}/{key[2]}), деталей: {len(opening_data['details'])}"
-            )
-            cell_counter += 1
-            
-        logger.info(f"✅ Распределено {cell_counter - 1} ячеек.")
+            key = f"{detail.orderitemsid}_{detail.izdpart or ''}"
+            cell_number = cell_map.get(key)
+            if cell_number is not None:
+                detail.cell_number = cell_number
+                assigned_count += 1
+        logger.info(f"✅ Номера ячеек присвоены для {assigned_count} деталей.")
+
 
     def _is_valid_guillotine_cut(self, area: Rectangle, detail_width: float, detail_height: float) -> bool:
         """Проверяет, создаст ли гильотинный разрез допустимые остатки"""
@@ -757,7 +734,8 @@ class GuillotineOptimizer:
 
 # Функция для совместимости с существующим интерфейсом
 def optimize(details: List[dict], materials: List[dict], remainders: List[dict],
-            params: dict = None, progress_fn: Optional[Callable[[float], None]] = None, **kwargs) -> OptimizationResult:
+             params: dict = None, progress_fn: Optional[Callable[[float], None]] = None, 
+             cell_map: Optional[Dict[str, int]] = None, **kwargs) -> OptimizationResult:
     """
     Главная функция оптимизации для совместимости с существующим GUI
     """
@@ -877,7 +855,7 @@ def optimize(details: List[dict], materials: List[dict], remainders: List[dict],
         if progress_fn:
             optimizer.set_progress_callback(progress_fn)
 
-        return optimizer.optimize(detail_objects, sheets)
+        return optimizer.optimize(detail_objects, sheets, cell_map=cell_map)
 
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")

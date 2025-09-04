@@ -253,9 +253,14 @@ class SimpleOptimizer:
                     length=profile.length,
                     element_name=profile.element_name,
                     order_id=profile.order_id,
-                    piece_id=f"{profile.id}_{profile.length}_{profile.order_id}_{i}"
+                    piece_id=f"{profile.id}_{profile.length}_{profile.order_id}_{i}",
+                    orderitemsid=profile.orderitemsid,
+                    izdpart=profile.izdpart
                 )
                 pieces_to_place.append(piece)
+        
+        # Распределяем номера ячеек
+        self._distribute_cells_for_profiles(pieces_to_place)
         
         total_pieces = len(pieces_to_place)
         print(f"🔧 Создано {total_pieces} деталей для размещения")
@@ -540,7 +545,8 @@ class SimpleOptimizer:
             for cut in stock['cuts']:
                 if (cut['profile_id'] == piece.profile_id and 
                     cut['length'] == piece.length and 
-                    cut.get('order_id') == piece.order_id):
+                    cut.get('order_id') == piece.order_id and
+                    cut.get('cell_number') == piece.cell_number): # Проверяем и ячейку
                     existing_cut = cut
                     break
             
@@ -554,7 +560,8 @@ class SimpleOptimizer:
                     'profile_code': piece.profile_code,  # Добавляем артикул профиля
                     'length': piece.length,
                     'quantity': 1,
-                    'order_id': piece.order_id  # Добавляем order_id для точного маппинга
+                    'order_id': piece.order_id,  # Добавляем order_id для точного маппинга
+                    'cell_number': piece.cell_number # Добавляем номер ячейки
                 }
                 stock['cuts'].append(cut_data)
                 print(f"🔧 OPTIMIZER: *** ИСПРАВЛЕННАЯ ВЕРСИЯ *** Добавлен cut с order_id: {piece.order_id}")
@@ -1683,6 +1690,64 @@ class SimpleOptimizer:
             print(f"  ✅ Создан финальный хлыст {final_stock_id} для артикула {profile_code} (размещено {placed_in_final}/{len(pieces)} деталей)")
         
         print(f"✅ Создано {len(pieces_by_profile)} финальных хлыстов")
+
+    def _distribute_cells_for_profiles(self, pieces: List[Piece]):
+        """Распределяет номера ячеек по уникальным проемам для профилей."""
+        print("🏠 Распределение номеров ячеек для профилей...")
+        
+        unique_openings = {}
+        
+        # Группируем детали по уникальному проему.
+        # Проем определяется по 'orderitemsid' и 'izdpart'
+        for piece in pieces:
+            key = (piece.orderitemsid, piece.izdpart)
+            if key not in unique_openings:
+                unique_openings[key] = {"pieces": []}
+            unique_openings[key]["pieces"].append(piece)
+            
+        # Сортируем проемы по orderitemsid и izdpart для последовательной нумерации
+        sorted_keys = sorted(unique_openings.keys())
+        
+        print("  --- Начало лога распределения ячеек для профилей ---")
+        cell_counter = 1
+        for key in sorted_keys:
+            opening_data = unique_openings[key]
+            print(f"  - Проем (ключ): {key}, Ячейка №{cell_counter}, Кол-во деталей: {len(opening_data['pieces'])}")
+            for piece in opening_data["pieces"]:
+                piece.cell_number = cell_counter
+            cell_counter += 1
+        print("  --- Конец лога распределения ячеек для профилей ---")
+            
+        print(f"✅ Распределение номеров ячеек для профилей завершено. Найдено {len(unique_openings)} уникальных проемов.")
+
+    def _prepare_final_stocks(self, cutting_plans: Dict[str, List[Dict]]) -> List[Dict]:
+        """
+        Подготавливает финальные хлысты для всех планов распила
+        """
+        final_stocks = []
+        for plan_id, plan_data in cutting_plans.items():
+            for stock_data in plan_data:
+                stock_id = stock_data['id']
+                stock_length = stock_data['length']
+                cuts = stock_data['cuts']
+                waste = stock_data['waste']
+                remainder = stock_data['remainder']
+                count = stock_data['count']
+                is_remainder = stock_data['is_remainder']
+                warehouseremaindersid = stock_data['warehouseremaindersid']
+                
+                final_stock = {
+                    'id': stock_id,
+                    'length': stock_length,
+                    'cuts': cuts,
+                    'waste': waste,
+                    'remainder': remainder,
+                    'count': count,
+                    'is_remainder': is_remainder,
+                    'warehouseremaindersid': warehouseremaindersid
+                }
+                final_stocks.append(final_stock)
+        return final_stocks
 
 
 class LinearOptimizer:

@@ -27,7 +27,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/profiles",
                 json={"order_id": order_id},
-                timeout=30
+                timeout=120
             )
             response.raise_for_status()
             
@@ -54,7 +54,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/stock",
                 json={"profile_id": profile_id},
-                timeout=30
+                timeout=120
             )
             response.raise_for_status()
             
@@ -82,7 +82,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/stock-remainders",
                 json={"profile_codes": profile_codes},
-                timeout=30
+                timeout=120
             )
             response.raise_for_status()
             
@@ -106,7 +106,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/stock-materials",
                 json={"profile_codes": profile_codes},
-                timeout=30
+                timeout=120
             )
             response.raise_for_status()
             
@@ -130,7 +130,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/fiberglass/get-details",
                 json={"grorder_mos_id": grorder_mos_id},
-                timeout=30
+                timeout=120
             )
             response.raise_for_status()
 
@@ -169,7 +169,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/fiberglass/get-remainders",
                 json={"goodsids": goodsids},
-                timeout=30
+                timeout=120
             )
             response.raise_for_status()
 
@@ -198,7 +198,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/fiberglass/get-materials",
                 json={"goodsids": goodsids},
-                timeout=30
+                timeout=120
             )
             response.raise_for_status()
 
@@ -231,7 +231,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/fiberglass/load-data",
                 json={"grorder_mos_id": grorder_mos_id},
-                timeout=30
+                timeout=120
             )
             response.raise_for_status()
 
@@ -254,7 +254,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/grorders-by-mos-id",
                 json={"grorders_mos_id": grorders_mos_id},
-                timeout=30
+                timeout=120
             )
             response.raise_for_status()
             data = response.json()
@@ -298,7 +298,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/upload-result",
                 json=data,
-                timeout=60
+                timeout=120
             )
             response.raise_for_status()
             
@@ -316,7 +316,7 @@ class APIClient:
             
             response = self.session.delete(
                 f"{self.base_url}/api/optimized-mos/by-grorders-mos-id/{grorders_mos_id}",
-                timeout=30
+                timeout=120
             )
             
             if response.status_code == 200:
@@ -342,7 +342,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/optimized-mos",
                 json=payload,
-                timeout=30
+                timeout=120
             )
             response.raise_for_status()
             
@@ -354,6 +354,30 @@ class APIClient:
             print(f"❌ API Client: Ошибка создания OPTIMIZED_MOS: {str(e)}")
             raise Exception(f"Ошибка создания OPTIMIZED_MOS: {str(e)}")
 
+    def create_optdetail_mos_bulk(self, payloads: List[Dict]) -> List[Dict]:
+        """Массово создать записи в OPTDETAIL_MOS"""
+        try:
+            if not payloads:
+                return []
+            
+            print(f"🔧 API Client: Отправка запроса на массовое создание {len(payloads)} записей OPTDETAIL_MOS")
+            
+            response = self.session.post(
+                f"{self.base_url}/api/optdetail-mos/bulk",
+                json=payloads,
+                timeout=300  # Увеличенный таймаут для массовой операции
+            )
+            response.raise_for_status()
+            
+            result = response.json()
+            print(f"✅ API Client: Массовое создание OPTDETAIL_MOS завершено, создано {len(result)} записей.")
+            return result
+            
+        except requests.RequestException as e:
+            print(f"❌ API Client: Ошибка массового создания OPTDETAIL_MOS: {str(e)}")
+            raise Exception(f"Ошибка массового создания OPTDETAIL_MOS: {str(e)}")
+
+
     def create_optdetail_mos(self, payload: Dict) -> Dict:
         """Создать запись в OPTDETAIL_MOS"""
         try:
@@ -362,7 +386,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/optdetail-mos",
                 json=payload,
-                timeout=30
+                timeout=120
             )
             response.raise_for_status()
             
@@ -418,7 +442,7 @@ class APIClient:
 
             # Основная выгрузка
             total_optimized_mos = 0
-            total_optdetail_mos = 0
+            optdetail_payloads = [] # Список для всех деталей
             
             for plan_index, plan in enumerate(result.cut_plans):
                 print(f"🔧 API Client: Обработка плана {plan_index + 1}/{len(result.cut_plans)}")
@@ -497,7 +521,6 @@ class APIClient:
 
                     # Детали распила для текущего хлыста
                     subnum_counter = 1
-                    plan_detail_count = 0
                     
                     for c in cuts:
                         length_val = float(c.get('length', 0) or 0)
@@ -531,7 +554,7 @@ class APIClient:
                             "num": bar_index,  # номер хлыста в плане
                             "subnum": subnum_counter,
                             "long_al": float(length_val) + float(blade_width_mm),
-                            "izdpart": None,
+                            "izdpart": c.get('izdpart'),
                             "partside": None,
                             "modelno": None,
                             "modelheight": None,
@@ -543,18 +566,20 @@ class APIClient:
                             "handleposfalts": None,
                             "flugelopentag": None,
                         }
-
-                        print(f"🔧 API Client: Создание OPTDETAIL_MOS {subnum_counter} для OPTIMIZED_MOS {optimized_mos_id}")
-                        self.create_optdetail_mos(detail_payload)
-                        total_optdetail_mos += 1
-                        plan_detail_count += 1
+                        optdetail_payloads.append(detail_payload)
                         subnum_counter += 1
-                    
-                    print(f"✅ API Client: Создано {plan_detail_count} записей OPTDETAIL_MOS для OPTIMIZED_MOS {optimized_mos_id}")
+            
+            # Массовая вставка всех деталей одним запросом
+            if optdetail_payloads:
+                print(f"🔧 API Client: Запуск массовой вставки {len(optdetail_payloads)} записей OPTDETAIL_MOS.")
+                self.create_optdetail_mos_bulk(optdetail_payloads)
+            else:
+                print("⚠️ API Client: Нет деталей для вставки в OPTDETAIL_MOS.")
+
 
             print(f"✅ API Client: Загрузка данных завершена успешно!")
             print(f"✅ API Client: Создано записей OPTIMIZED_MOS: {total_optimized_mos}")
-            print(f"✅ API Client: Создано записей OPTDETAIL_MOS: {total_optdetail_mos}")
+            print(f"✅ API Client: Создано записей OPTDETAIL_MOS: {len(optdetail_payloads)}")
             
             return True
 
@@ -562,13 +587,16 @@ class APIClient:
             print(f"❌ API Client: Ошибка загрузки данных MOS: {str(e)}")
             raise Exception(f"Ошибка загрузки данных MOS: {str(e)}")
 
-    def distribute_cell_numbers(self, grorders_mos_id: int) -> dict:
+    def distribute_cell_numbers(self, grorders_mos_id: int, cell_map: Dict[str, int] = None) -> dict:
         """
         Распределить номера ячеек для оптимизации москитных сеток.
         Выполняется ПОСЛЕ загрузки данных оптимизации в altawin.
         
         Args:
             grorders_mos_id: ID сменного задания москитных сеток
+            cell_map (Dict[str, int], optional): Карта для распределения ячеек.
+                                                Ключ: f"{orderitemsid}_{izdpart}", Значение: cell_number.
+                                                По умолчанию None.
             
         Returns:
             dict: Результат операции с информацией о количестве обработанных проемов
@@ -579,6 +607,9 @@ class APIClient:
             payload = {
                 "grorder_mos_id": grorders_mos_id
             }
+            if cell_map:
+                payload["cell_map"] = cell_map
+                print(f"🔧 API Client: Отправка с картой ячеек ({len(cell_map)} записей).")
             
             response = self.session.post(f"{self.base_url}/api/distribute-cell-numbers", json=payload)
             response.raise_for_status()
@@ -634,7 +665,7 @@ class APIClient:
             response = self.session.post(
                 f"{self.base_url}/api/adjust-materials-altawin",
                 json=payload,
-                timeout=60
+                timeout=120
             )
             response.raise_for_status()
             result = response.json()

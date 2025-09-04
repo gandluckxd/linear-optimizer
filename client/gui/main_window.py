@@ -1,4 +1,3 @@
-
 """
 Главное окно Linear Optimizer
 Профессиональная система оптимизации линейного распила
@@ -23,6 +22,7 @@ import requests
 import os
 import json
 import logging
+from typing import Dict
 
 
 # Импорты для модульной архитектуры
@@ -835,15 +835,6 @@ class LinearOptimizerWindow(QMainWindow):
         self.upload_mos_to_altawin_button.setEnabled(False)
         upload_layout.addWidget(self.upload_mos_to_altawin_button)
         
-        # Кнопка распределения ячеек
-        self.distribute_cells_button = QPushButton("🏠 Распределить ячейки")
-        self.distribute_cells_button.setStyleSheet(SPECIAL_BUTTON_STYLES["distribute"])
-        self.distribute_cells_button.clicked.connect(self.on_distribute_cells_clicked)
-        self.distribute_cells_button.setEnabled(False)
-        upload_layout.addWidget(self.distribute_cells_button)
-
-
-
         upload_layout.addStretch()
         
         layout.addLayout(upload_layout)
@@ -1064,13 +1055,19 @@ class LinearOptimizerWindow(QMainWindow):
             print(f"  - remainders: {len(remainders_dict)} элементов")
             print(f"  - params: {fabric_params}")
 
+            # Генерируем единую карту ячеек ПЕРЕД вызовом оптимизации
+            cell_map = self._generate_cell_map()
+            if not cell_map:
+                self.debug_step_signal.emit("⚠️ Не удалось сгенерировать карту ячеек для фибергласса.")
+
             # Синхронный вызов оптимизации фибергласса
             self.fabric_optimization_result = optimize_fiberglass(
                 details=details_dict,
                 materials=materials_dict,
                 remainders=remainders_dict,
                 params=fabric_params,
-                progress_fn=progress_callback
+                progress_fn=progress_callback,
+                cell_map=cell_map  # Передаем карту ячеек
             )
 
             print(f"🔧 DEBUG: optimize_fiberglass вернул: {self.fabric_optimization_result}")
@@ -1329,7 +1326,6 @@ class LinearOptimizerWindow(QMainWindow):
             
                         # Активируем кнопку загрузки в Altawin (MOS)
             self.upload_mos_to_altawin_button.setEnabled(True)
-            self.distribute_cells_button.setEnabled(True)
 
             # Обновляем вкладку визуализации с результатами фибергласса (если они есть)
             if hasattr(self, 'fabric_optimization_result') and self.fabric_optimization_result:
@@ -1473,7 +1469,6 @@ class LinearOptimizerWindow(QMainWindow):
         self.optimization_result = None
 
         self.upload_mos_to_altawin_button.setEnabled(False)
-        self.distribute_cells_button.setEnabled(False)
         self.optimize_button.setEnabled(False)
         self.order_info_label.setText("<заказ не загружен>")
 
@@ -1526,14 +1521,13 @@ class LinearOptimizerWindow(QMainWindow):
         try:
             self.status_bar.showMessage("Загрузка результатов оптимизации в таблицы MOS...")
             self.upload_mos_to_altawin_button.setEnabled(False)
-            self.distribute_cells_button.setEnabled(False)
 
             # ШАГ 1: Сначала загружаем результаты оптимизации в таблицы OPTIMIZED_MOS и OPTDETAIL_MOS
             self.status_bar.showMessage("Загрузка результатов оптимизации в таблицы MOS...")
             
-            # Используем текущие параметры распила из UI
-            blade_width = int(self.blade_width.value())
-            min_remainder = int(self.min_remainder_length.value())
+            # Используем текущие параметры распила из сохраненных настроек
+            blade_width = int(self.optimization_params.get('blade_width', 5))
+            min_remainder = int(self.optimization_params.get('min_remainder_length', 300))
 
             # Загружаем результаты оптимизации
             upload_success = self.api_client.upload_mos_data(
@@ -1542,9 +1536,9 @@ class LinearOptimizerWindow(QMainWindow):
                 profiles=self.profiles,
                 blade_width_mm=blade_width,
                 min_remainder_mm=min_remainder,
-                begin_indent_mm=int(self.begin_indent.value()),
-                end_indent_mm=int(self.end_indent.value()),
-                min_trash_mm=int(self.min_trash_mm.value()),
+                begin_indent_mm=int(self.optimization_params.get('begin_indent', 10)),
+                end_indent_mm=int(self.optimization_params.get('end_indent', 10)),
+                min_trash_mm=int(self.optimization_params.get('min_trash_mm', 50)),
             )
 
             if not upload_success:
@@ -1713,12 +1707,13 @@ class LinearOptimizerWindow(QMainWindow):
                     QMessageBox.warning(self, "Предупреждение", f"Ошибка корректировки материалов: {str(e)}\n\nРезультаты оптимизации загружены успешно, но материалы не скорректированы.")
                     self.status_bar.showMessage("Результаты загружены, но ошибка корректировки материалов")
 
+            # ШАГ 3: Автоматическое распределение ячеек
+            self._auto_distribute_cells(grorders_mos_id)
+
             # Показываем итоговое сообщение об успехе
             success_msg = "✅ Результаты оптимизации успешно загружены в таблицы OPTIMIZED_MOS и OPTDETAIL_MOS"
             if adjust_materials:
                 success_msg += "\n\n✅ Материалы в Altawin также были скорректированы"
-            success_msg += "\n\n💡 Для распределения ячеек используйте кнопку 'Распределить ячейки'"
-            
             QMessageBox.information(self, "Успех", success_msg)
             self.status_bar.showMessage("MOS данные успешно загружены")
 
@@ -1727,8 +1722,87 @@ class LinearOptimizerWindow(QMainWindow):
             self.status_bar.showMessage("Ошибка загрузки MOS данных")
         finally:
             self.upload_mos_to_altawin_button.setEnabled(True)
-            self.distribute_cells_button.setEnabled(True)
     
+    def _auto_distribute_cells(self, grorders_mos_id):
+        """Автоматическое распределение ячеек без подтверждения от пользователя."""
+        try:
+            self.status_bar.showMessage("Автоматическое распределение ячеек...")
+
+            # Генерируем карту ячеек на основе загруженных данных
+            cell_map = self._generate_cell_map()
+
+            if not cell_map:
+                QMessageBox.information(self, "Информация", "Нет уникальных проемов для распределения ячеек.")
+                self.status_bar.showMessage("Нет данных для распределения ячеек")
+                return
+
+            # Вызываем API с сгенерированной картой
+            result = self.api_client.distribute_cell_numbers(grorders_mos_id, cell_map=cell_map)
+
+            if result.get("success"):
+                processed_items = result.get("processed_items", 0)
+                total_time = result.get("performance", {}).get("total_time", 0)
+                
+                print(f"✅ Распределение ячеек выполнено успешно для {processed_items} проемов за {total_time} сек.")
+                self.status_bar.showMessage(f"Ячейки распределены ({processed_items} проемов)")
+                
+            else:
+                error_msg = result.get("error", result.get("message", "Неизвестная ошибка"))
+                QMessageBox.warning(self, "Ошибка", f"Ошибка автоматического распределения ячеек:\n{error_msg}")
+                self.status_bar.showMessage("Ошибка распределения ячеек")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Критическая ошибка", f"Критическая ошибка при автоматическом распределении ячеек:\n{str(e)}")
+            self.status_bar.showMessage("Критическая ошибка распределения ячеек")
+
+    def _generate_cell_map(self) -> Dict[str, int]:
+        """
+        Генерирует карту распределения ячеек на основе загруженных данных.
+        
+        Собирает все уникальные пары (orderitemsid, izdpart) из профилей и деталей фибергласса,
+        сортирует их и присваивает последовательный номер ячейки.
+        
+        Returns:
+            Dict[str, int]: Карта, где ключ - f"{orderitemsid}_{izdpart}", а значение - номер ячейки.
+        """
+        unique_items = set()
+
+        # Собираем уникальные элементы из профилей
+        if self.profiles:
+            for profile in self.profiles:
+                if hasattr(profile, 'orderitemsid') and profile.orderitemsid is not None:
+                    # izdpart может отсутствовать или быть None, используем пустую строку для консистентности
+                    izdpart = getattr(profile, 'izdpart', '') or ''
+                    unique_items.add((profile.orderitemsid, izdpart))
+
+        # Собираем уникальные элементы из деталей фибергласса
+        if self.fabric_details:
+            for detail in self.fabric_details:
+                if hasattr(detail, 'orderitemsid') and detail.orderitemsid is not None:
+                    izdpart = getattr(detail, 'izdpart', '') or ''
+                    unique_items.add((detail.orderitemsid, izdpart))
+
+        if not unique_items:
+            print("⚠️ Не найдено элементов для создания карты ячеек.")
+            return {}
+
+        # Сортируем для последовательной нумерации
+        # Сортируем сначала по orderitemsid, затем по izdpart
+        sorted_items = sorted(list(unique_items), key=lambda x: (x[0], x[1]))
+
+        # Создаем карту: {ключ: номер_ячейки}
+        cell_map = {f"{orderitemsid}_{izdpart}": i + 1 for i, (orderitemsid, izdpart) in enumerate(sorted_items)}
+
+        if cell_map:
+            print(f"✅ Карта ячеек успешно сгенерирована, {len(cell_map)} уникальных записей.")
+            # Логируем первые 5 записей для отладки
+            for i, (key, value) in enumerate(cell_map.items()):
+                if i >= 5: break
+                print(f"   - {key}: {value}")
+
+        return cell_map
+
+
     def on_distribute_cells_clicked(self):
         """Обработчик нажатия кнопки распределения ячеек"""
         order_ids_text = self.order_id_input.text().strip()
@@ -1757,7 +1831,6 @@ class LinearOptimizerWindow(QMainWindow):
 
         try:
             self.status_bar.showMessage("Распределение ячеек...")
-            self.distribute_cells_button.setEnabled(False)
             
             # Вызываем API для распределения ячеек
             result = self.api_client.distribute_cell_numbers(grorders_mos_id)
@@ -1784,7 +1857,7 @@ class LinearOptimizerWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Ошибка распределения ячеек:\n{str(e)}")
             self.status_bar.showMessage("Ошибка распределения ячеек")
         finally:
-            self.distribute_cells_button.setEnabled(True)
+            pass
 
 
 

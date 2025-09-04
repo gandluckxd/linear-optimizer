@@ -51,7 +51,8 @@ def get_profiles_for_order(order_id: int) -> List[Profile]:
             g.goodsid,
             grd.qty * itd.qty as total_qty,
             itd.thick,
-            o.orderid
+            o.orderid,
+            itd.izdpart
         FROM grorders gr
         JOIN grordersdetail grd on grd.grorderid = gr.grorderid
         JOIN orderitems oi on oi.orderitemsid = grd.orderitemsid
@@ -76,7 +77,9 @@ def get_profiles_for_order(order_id: int) -> List[Profile]:
                 element_name=row[4] or "",  # oi_name - Элемент (наименование orderitem)
                 profile_code=row[6],  # g_marking - Артикул профиля
                 length=float(row[9]),  # thick (длина)
-                quantity=int(row[8])  # total_qty - Количество
+                quantity=int(row[8]),  # total_qty - Количество
+                orderitemsid=row[3], # oi.orderitemsid
+                izdpart=row[11]      # itd.izdpart
             )
             profiles.append(profile)
             print(f"🔍 DB: *** ОТЛАДКА *** Загружен профиль: goodsid={row[7]}, orderid={row[10]}, length={row[9]}, qty={row[8]}")
@@ -1730,18 +1733,23 @@ def get_warehouse_remainders_by_goodsid(goodsid: int) -> List[Dict[str, Any]]:
         raise
 
 
-def distribute_cell_numbers(grorder_mos_id: int) -> Dict[str, Any]:
+def distribute_cell_numbers(grorder_mos_id: int, cell_map: Dict[str, int] = None) -> Dict[str, Any]:
     """
     Распределение ячеек для оптимизации москитных сеток.
     Выполняется ПОСЛЕ загрузки данных оптимизации в altawin.
     
     Логика:
-    1. Получаем все уникальные orderitemsid с маркировкой проема по grorder_mos_id
-    2. Проходим циклом for по результатам и присваиваем каждому уникальному проему последовательный номер ячейки
-    3. Обновляем поле cell_number в таблице optdetail_mos
+    1. Если передан `cell_map`, используется он для прямого присвоения ячеек.
+    2. Если `cell_map` не передан, используется старая логика:
+       - Получаем все уникальные orderitemsid с маркировкой проема по grorder_mos_id
+       - Проходим циклом for по результатам и присваиваем каждому уникальному проему последовательный номер ячейки
+       - Обновляем поле cell_number в таблице optdetail_mos
     
     Args:
         grorder_mos_id: ID сменного задания москитных сеток
+        cell_map (Dict[str, int], optional): Карта для распределения ячеек. 
+                                            Ключ: f"{orderitemsid}_{izdpart}", Значение: cell_number.
+                                            По умолчанию None.
         
     Returns:
         dict: Результат операции с информацией о количестве обработанных проемов
@@ -1755,81 +1763,93 @@ def distribute_cell_numbers(grorder_mos_id: int) -> Dict[str, Any]:
         con = get_db_connection()
         cur = con.cursor()
         
-        # Начинаем транзакцию
         con.begin()
         
-        # 1. Получаем все уникальные orderitemsid с маркировкой проема
-        unique_items_sql = """
-        SELECT DISTINCT
-            vd.partside,
-            vd.orderitemsid
-        FROM voptdetail_mos vd
-        WHERE vd.optimizedid IN (
-            SELECT om.optimized_mos_id 
-            FROM optimized_mos om 
-            WHERE om.grorder_mos_id = ?
-        )
-        ORDER BY vd.orderitemsid, vd.partside
-        """
-        
-        if ENABLE_LOGGING:
-            print("🔧 DB: Выполняем SQL-запрос для получения уникальных проемов:")
-            print(f"   SQL: {unique_items_sql}")
-            print(f"   Параметр: grorder_mos_id={grorder_mos_id}")
-        
-        cur.execute(unique_items_sql, (grorder_mos_id,))
-        unique_items = cur.fetchall()
-        
-        if not unique_items:
-            if ENABLE_LOGGING:
-                print(f"⚠️ DB: Не найдено уникальных проемов для grorder_mos_id={grorder_mos_id}")
-            con.rollback()
-            con.close()
-            return {
-                "success": False,
-                "message": "Не найдено уникальных проемов для распределения ячеек",
-                "processed_items": 0,
-                "performance": {
-                    "total_time": round(time.time() - operation_start_time, 2)
-                }
-            }
-        
-        if ENABLE_LOGGING:
-            print(f"✅ DB: Найдено {len(unique_items)} уникальных проемов для распределения ячеек")
-            for i, item in enumerate(unique_items):
-                print(f"   [{i+1}] partside='{item[0]}', orderitemsid={item[1]}")
-        
-        # 2. Проходим циклом for и присваиваем номера ячеек (начинаем с 1)
         processed_count = 0
-        
-        for i, (partside, orderitemsid) in enumerate(unique_items, start=1):  # Начинаем с 1
+
+        if cell_map:
+            # Новая логика: используем предоставленную карту
             if ENABLE_LOGGING:
-                print(f"🔧 DB: Обрабатываем проем {i}/{len(unique_items)}: partside='{partside}', orderitemsid={orderitemsid}")
-            
-            # 3. Обновляем номер ячейки для всех записей данного проема
-            update_cell_sql = """
-            UPDATE optdetail_mos odm 
-            SET odm.cell_number = ? 
-            WHERE (odm.itemsdetailid IN (
-                SELECT itd.itemsdetailid 
-                FROM itemsdetail itd 
-                WHERE itd.orderitemsid = ?
-            ))
-            AND (odm.partside = ?)
+                print(f"🔧 DB: Используется новая логика распределения ячеек с предоставленной картой ({len(cell_map)} записей).")
+
+            for key, cell_number in cell_map.items():
+                try:
+                    orderitemsid_str, izdpart = key.split('_', 1)
+                    orderitemsid = int(orderitemsid_str)
+                except (ValueError, IndexError):
+                    if ENABLE_LOGGING:
+                        print(f"⚠️ DB: Неверный формат ключа в cell_map: '{key}'. Пропускаем.")
+                    continue
+                
+                update_sql = """
+                UPDATE optdetail_mos
+                SET cell_number = ?
+                WHERE optdetail_mos_id IN (
+                    SELECT odm.optdetail_mos_id
+                    FROM optdetail_mos odm
+                    JOIN optimized_mos om ON om.optimized_mos_id = odm.optimized_mos_id
+                    JOIN itemsdetail itd ON itd.itemsdetailid = odm.itemsdetailid
+                    WHERE om.grorder_mos_id = ?
+                      AND itd.orderitemsid = ?
+                      AND COALESCE(odm.izdpart, '') = ?
+                )
+                """
+                cur.execute(update_sql, (cell_number, grorder_mos_id, orderitemsid, izdpart))
+                updated_rows = cur.rowcount if hasattr(cur, 'rowcount') else 0
+                if updated_rows > 0:
+                    processed_count += 1
+                if ENABLE_LOGGING:
+                    print(f"   - Обработан ключ '{key}': ячейка={cell_number}, обновлено {updated_rows} деталей.")
+
+        else:
+            # Старая логика: если карта не предоставлена
+            if ENABLE_LOGGING:
+                print("🔧 DB: Используется старая логика автоматического распределения ячеек.")
+                
+            unique_items_sql = """
+            SELECT DISTINCT
+                COALESCE(vd.izdpart, '') as izdpart,
+                vd.orderitemsid
+            FROM voptdetail_mos vd
+            WHERE vd.optimizedid IN (
+                SELECT om.optimized_mos_id 
+                FROM optimized_mos om 
+                WHERE om.grorder_mos_id = ?
+            )
+            ORDER BY vd.orderitemsid, COALESCE(vd.izdpart, '')
             """
             
+            cur.execute(unique_items_sql, (grorder_mos_id,))
+            unique_items = cur.fetchall()
+            
+            if not unique_items:
+                con.rollback()
+                con.close()
+                return {
+                    "success": False, "message": "Не найдено уникальных проемов для распределения ячеек",
+                    "processed_items": 0, "performance": {"total_time": round(time.time() - operation_start_time, 2)}
+                }
+            
             if ENABLE_LOGGING:
-                print(f"🔧 DB: Выполняем UPDATE с параметрами: cell_number={i}, orderitemsid={orderitemsid}, partside='{partside}'")
+                print(f"✅ DB: Найдено {len(unique_items)} уникальных проемов для автоматического распределения.")
             
-            cur.execute(update_cell_sql, (i, orderitemsid, partside))
-            updated_rows = cur.rowcount if hasattr(cur, 'rowcount') else 0
-            
-            if ENABLE_LOGGING:
-                print(f"✅ DB: Обновлено {updated_rows} записей для проема с cell_number={i}")
-            
-            processed_count += 1
+            for i, (izdpart, orderitemsid) in enumerate(unique_items, start=1):
+                update_cell_sql = """
+                UPDATE optdetail_mos
+                SET cell_number = ?
+                WHERE optdetail_mos_id IN (
+                    SELECT odm.optdetail_mos_id
+                    FROM optdetail_mos odm
+                    JOIN optimized_mos om ON om.optimized_mos_id = odm.optimized_mos_id
+                    JOIN itemsdetail itd ON itd.itemsdetailid = odm.itemsdetailid
+                    WHERE om.grorder_mos_id = ?
+                    AND itd.orderitemsid = ?
+                    AND COALESCE(odm.izdpart, '') = ?
+                )
+                """
+                cur.execute(update_cell_sql, (i, grorder_mos_id, orderitemsid, izdpart))
+                processed_count += 1
         
-        # Фиксируем изменения
         con.commit()
         con.close()
         
@@ -1837,7 +1857,7 @@ def distribute_cell_numbers(grorder_mos_id: int) -> Dict[str, Any]:
         
         if ENABLE_LOGGING:
             print(f"✅ DB: Распределение ячеек завершено успешно за {total_time:.2f} секунд")
-            print(f"   Обработано уникальных проемов: {processed_count}")
+            print(f"   Обработано уникальных проемов/записей: {processed_count}")
         
         return {
             "success": True,
@@ -1857,7 +1877,6 @@ def distribute_cell_numbers(grorder_mos_id: int) -> Dict[str, Any]:
             import traceback
             print(f"❌ DB: Трассировка ошибки: {traceback.format_exc()}")
         
-        # Откатываем изменения в случае ошибки
         try:
             if 'con' in locals() and con:
                 con.rollback()
@@ -2215,5 +2234,240 @@ def load_fiberglass_data(grorder_mos_id: int) -> FiberglassLoadDataResponse:
     except Exception as e:
         if ENABLE_LOGGING:
             print(f"❌ Ошибка загрузки данных фибергласса: {e}")
+        raise
+
+
+def insert_optdetail_mos_bulk(details: List[Dict[str, Any]]) -> List[OptDetailMos]:
+    """
+    Массовая вставка записей в OPTDETAIL_MOS с предварительным кешированием и executemany.
+    """
+    if not details:
+        return []
+
+    if ENABLE_LOGGING:
+        print(f"🔧 DB: Начало executemany-вставки {len(details)} записей в OPTDETAIL_MOS")
+
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+        con.begin()
+
+        # Шаг 1: Сбор всех необходимых идентификаторов для кеширования
+        order_ids = set()
+        goods_ids = set()
+        itemsdetail_ids = set()
+        optimized_mos_ids = set()
+
+        for detail in details:
+            if detail.get("orderid"):
+                order_ids.add(detail["orderid"])
+            if detail.get("itemsdetailid"):
+                itemsdetail_ids.add(detail["itemsdetailid"])
+            if detail.get("optimized_mos_id"):
+                 optimized_mos_ids.add(detail["optimized_mos_id"])
+
+
+        # Шаг 2: Предварительное кеширование данных
+        
+        # Кешируем goodsid для каждого optimized_mos_id
+        optimized_mos_cache = {}
+        if optimized_mos_ids:
+            placeholders = ",".join(["?"] * len(optimized_mos_ids))
+            sql = f"SELECT OPTIMIZED_MOS_ID, GOODSID FROM OPTIMIZED_MOS WHERE OPTIMIZED_MOS_ID IN ({placeholders})"
+            cur.execute(sql, list(optimized_mos_ids))
+            for row in cur.fetchall():
+                optimized_mos_cache[row[0]] = row[1]
+                if row[1]:
+                    goods_ids.add(row[1])
+
+        # Кешируем ITEMSDETAIL по orderid и goodsid
+        itemsdetail_cache = {}
+        if order_ids and goods_ids:
+            order_placeholders = ",".join(["?"] * len(order_ids))
+            goods_placeholders = ",".join(["?"] * len(goods_ids))
+            sql = (
+                "SELECT oi.ORDERID, itd.GOODSID, itd.THICK, itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, "
+                "itd.MODELNO, oi.WIDTH AS O_WIDTH, oi.HEIGHT AS O_HEIGHT, itd.WIDTH AS D_WIDTH, itd.HEIGHT AS D_HEIGHT "
+                "FROM ITEMSDETAIL itd "
+                "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = itd.ORDERITEMSID "
+                f"WHERE oi.ORDERID IN ({order_placeholders}) AND itd.GOODSID IN ({goods_placeholders})"
+            )
+            cur.execute(sql, list(order_ids) + list(goods_ids))
+            for row in cur.fetchall():
+                key = (row[0], row[1]) # (orderid, goodsid)
+                if key not in itemsdetail_cache:
+                    itemsdetail_cache[key] = []
+                itemsdetail_cache[key].append(row[2:]) # (thick, itemsdetailid, ...)
+
+        # Кешируем orderid по itemsdetailid
+        orderid_cache = {}
+        if itemsdetail_ids:
+            placeholders = ",".join(["?"] * len(itemsdetail_ids))
+            sql = (
+                "SELECT itd.ITEMSDETAILID, oi.ORDERID FROM ITEMSDETAIL itd "
+                "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = itd.ORDERITEMSID "
+                f"WHERE itd.ITEMSDETAILID IN ({placeholders})"
+            )
+            cur.execute(sql, list(itemsdetail_ids))
+            for row in cur.fetchall():
+                orderid_cache[row[0]] = row[1]
+        
+        # Шаг 2.5: Предварительно получаем все необходимые ID
+        new_ids = []
+        for _ in range(len(details)):
+            cur.execute("SELECT GEN_ID(GEN_OPTDETAIL_MOS_ID, 1) FROM RDB$DATABASE")
+            new_ids.append(cur.fetchone()[0])
+        
+        created_records = []
+        params_for_insert = []
+
+        # Шаг 3: Обработка и подготовка каждой детали для массовой вставки
+        for i, detail_data in enumerate(details):
+            enriched_data = detail_data.copy()
+            
+            goodsid = optimized_mos_cache.get(detail_data.get("optimized_mos_id"))
+
+            if enriched_data.get("itemsdetailid") is None and enriched_data.get("orderid") and goodsid:
+                cache_key = (enriched_data["orderid"], goodsid)
+                candidates = itemsdetail_cache.get(cache_key, [])
+                if candidates:
+                    target_length = float(enriched_data.get("itemlong") or 0)
+                    best_match = min(candidates, key=lambda c: abs((c[0] or 0) - target_length))
+                    
+                    enriched_data["itemsdetailid"] = best_match[1]
+                    if enriched_data.get("ug1") is None: enriched_data["ug1"] = best_match[2]
+                    if enriched_data.get("ug2") is None: enriched_data["ug2"] = best_match[3]
+                    if not enriched_data.get("izdpart"): enriched_data["izdpart"] = best_match[4]
+                    if not enriched_data.get("partside"): enriched_data["partside"] = best_match[5]
+                    if enriched_data.get("modelno") is None: enriched_data["modelno"] = best_match[6]
+                    if enriched_data.get("modelwidth") is None: enriched_data["modelwidth"] = best_match[7] or best_match[9]
+                    if enriched_data.get("modelheight") is None: enriched_data["modelheight"] = best_match[8] or best_match[10]
+
+            if enriched_data.get("itemsdetailid") in orderid_cache:
+                enriched_data["orderid"] = orderid_cache[enriched_data["itemsdetailid"]]
+            
+            new_id = new_ids[i]
+            enriched_data['id'] = new_id
+
+            params_for_insert.append((
+                new_id,
+                enriched_data.get("optimized_mos_id"),
+                enriched_data.get("orderid"),
+                enriched_data.get("itemsdetailid"),
+                enriched_data.get("itemlong"),
+                enriched_data.get("qty"),
+                enriched_data.get("ug1"),
+                enriched_data.get("ug2"),
+                enriched_data.get("num"),
+                enriched_data.get("subnum"),
+                enriched_data.get("long_al"),
+                enriched_data.get("izdpart"),
+                enriched_data.get("partside"),
+                enriched_data.get("modelno"),
+                enriched_data.get("modelheight"),
+                enriched_data.get("modelwidth"),
+                enriched_data.get("flugelopentype"),
+                enriched_data.get("flugelcount"),
+                enriched_data.get("ishandle"),
+                enriched_data.get("handlepos"),
+                enriched_data.get("handleposfalts"),
+                enriched_data.get("flugelopentag"),
+            ))
+            
+            created_records.append(OptDetailMos(**enriched_data))
+
+        # Шаг 4: Массовая вставка всех записей одним вызовом
+        insert_sql = (
+            "INSERT INTO OPTDETAIL_MOS ("
+            "OPTDETAIL_MOS_ID, OPTIMIZED_MOS_ID, ORDERID, ITEMSDETAILID, ITEMLONG, QTY, UG1, UG2, NUM, SUBNUM, LONG_AL, IZDPART, PARTSIDE, MODELNO, MODELHEIGHT, MODELWIDTH, FLUGELOPENTYPE, FLUGELCOUNT, ISHANDLE, HANDLEPOS, HANDLEPOSFALTS, FLUGELOPENTAG"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        )
+        
+        cur.executemany(insert_sql, params_for_insert)
+
+        con.commit()
+        if ENABLE_LOGGING:
+            print(f"✅ DB: Успешно вставлено {len(created_records)} записей в OPTDETAIL_MOS через executemany")
+
+        return created_records
+
+    except Exception as e:
+        try:
+            con.rollback()
+        except Exception: pass
+        if ENABLE_LOGGING:
+            print(f"❌ DB: Ошибка массовой вставки в OPTDETAIL_MOS: {e}")
+        raise
+    finally:
+        if con:
+            con.close()
+
+
+def delete_grorders_mos(grorders_mos_id: int) -> bool:
+    """
+    Удалить запись из GRORDERS_MOS по ID. Возвращает True, если запись удалена.
+    """
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        con.begin()
+        cur.execute("DELETE FROM GRORDERS_MOS WHERE ID = ?", (grorders_mos_id,))
+        affected = cur.rowcount if hasattr(cur, "rowcount") else None
+        con.commit()
+        con.close()
+
+        return bool(affected) if affected is not None else True
+    except Exception as e:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        if ENABLE_LOGGING:
+            print(f"Ошибка удаления из GRORDERS_MOS: {e}")
+        raise
+
+
+def delete_optimized_mos_by_grorders_mos_id(grorders_mos_id: int) -> bool:
+    """
+    Удалить все записи из OPTIMIZED_MOS по GRORDER_MOS_ID.
+    Дополнительно удаляет связанные записи из OPTDETAIL_MOS, чтобы избежать конфликтов внешних ключей.
+    Возвращает True, если удаление прошло успешно.
+    """
+    try:
+        con = get_db_connection()
+        cur = con.cursor()
+
+        con.begin()
+
+        # Сначала удаляем детали, связанные с optimized_mos для указанного grorders_mos_id
+        cur.execute(
+            """
+            DELETE FROM OPTDETAIL_MOS
+            WHERE OPTIMIZED_MOS_ID IN (
+                SELECT OPTIMIZED_MOS_ID FROM OPTIMIZED_MOS WHERE GRORDER_MOS_ID = ?
+            )
+            """,
+            (grorders_mos_id,),
+        )
+
+        # Затем удаляем сами optimized_mos
+        cur.execute(
+            "DELETE FROM OPTIMIZED_MOS WHERE GRORDER_MOS_ID = ?",
+            (grorders_mos_id,),
+        )
+        affected = cur.rowcount if hasattr(cur, "rowcount") else None
+
+        con.commit()
+        con.close()
+
+        return bool(affected) if affected is not None else True
+    except Exception as e:
+        try:
+            con.rollback()
+        except Exception:
+            pass
+        if ENABLE_LOGGING:
+            print(f"Ошибка удаления из OPTIMIZED_MOS по GRORDER_MOS_ID={grorders_mos_id}: {e}")
         raise
 
