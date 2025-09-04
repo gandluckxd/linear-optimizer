@@ -23,6 +23,7 @@ class PlacedFiberglassItem:
     item_type: str  # "detail", "remainder", "waste"
     detail: Optional['FiberglassDetail'] = None
     is_rotated: bool = False
+    cell_number: Optional[int] = None
 
     def __post_init__(self):
         self.x2 = self.x + self.width

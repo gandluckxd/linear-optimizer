@@ -47,6 +47,7 @@ class Detail:
     orderno: str = ""  # Номер заказа
     item_name: str = ""  # Номер изделия
     izdpart: str = ""  # Номер части изделия
+    cell_number: Optional[int] = None
 
     def __post_init__(self):
         self.area = self.width * self.height
@@ -84,6 +85,7 @@ class PlacedItem:
     item_type: str  # "detail", "remnant", "waste"
     detail: Optional[Detail] = None
     is_rotated: bool = False
+    cell_number: Optional[int] = None
 
     def __post_init__(self):
         self.x2 = self.x + self.width
@@ -275,6 +277,10 @@ class GuillotineOptimizer:
             # Подготовка данных
             self._report_progress(10)
             prepared_details = self._prepare_details(details)
+
+            # Распределение ячеек
+            self._distribute_cells(prepared_details)
+
             prepared_sheets = self._prepare_sheets(sheets)
 
             # Группировка по материалам
@@ -480,7 +486,8 @@ class GuillotineOptimizer:
                 height=height,
                 item_type="detail",
                 detail=detail,
-                is_rotated=is_rotated
+                is_rotated=is_rotated,
+                cell_number=detail.cell_number
             )
             layout.placed_items.append(placed_item)
             placed_detail_ids.add(detail.id)
@@ -504,6 +511,47 @@ class GuillotineOptimizer:
             logger.error(f"❌ ОШИБКА: Покрытие листа только {coverage:.1f}%!")
 
         return layout
+
+    def _distribute_cells(self, details: List[Detail]):
+        """Распределяет номера ячеек по уникальным проемам."""
+        logger.info("🏠 Распределение номеров ячеек...")
+        
+        unique_openings = {}
+        
+        # Группируем детали по уникальному проему.
+        # Проем определяется по 'orderno', 'item_name', 'izdpart'
+        for detail in details:
+            # Используем combinatie van orderno, item_name, and izdpart als unieke sleutel
+            # voor de opening. Dit is meer betrouwbaar dan alleen de grootte.
+            key = (detail.orderno, detail.item_name, detail.izdpart)
+            if key not in unique_openings:
+                unique_openings[key] = {
+                    "details": [],
+                    "width": detail.width,
+                    "height": detail.height,
+                }
+            unique_openings[key]["details"].append(detail)
+            
+        # Сортируем проемы для последовательной нумерации (например, по размеру)
+        sorted_keys = sorted(
+            unique_openings.keys(), 
+            key=lambda k: (unique_openings[k]['width'] * unique_openings[k]['height']), 
+            reverse=True
+        )
+        
+        cell_counter = 1
+        for key in sorted_keys:
+            opening_data = unique_openings[key]
+            for detail in opening_data["details"]:
+                detail.cell_number = cell_counter
+            
+            logger.info(
+                f"  - Ячейка {cell_counter}: {opening_data['width']}x{opening_data['height']}мм "
+                f"({key[1]}/{key[2]}), деталей: {len(opening_data['details'])}"
+            )
+            cell_counter += 1
+            
+        logger.info(f"✅ Распределено {cell_counter - 1} ячеек.")
 
     def _is_valid_guillotine_cut(self, area: Rectangle, detail_width: float, detail_height: float) -> bool:
         """Проверяет, создаст ли гильотинный разрез допустимые остатки"""

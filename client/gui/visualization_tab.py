@@ -618,6 +618,10 @@ class FiberglassCanvas(QFrame):
             if hasattr(item.detail, 'orderno') and item.detail.orderno:
                 text_parts.append(str(item.detail.orderno))
             
+            # Новая строка для номера ячейки
+            if hasattr(item, 'cell_number') and item.cell_number is not None:
+                text_parts.append(f"Ячейка: {item.cell_number}")
+
             # 2) Номер изделия + / + номер части изделия
             line2_parts = []
             if hasattr(item.detail, 'item_name') and item.detail.item_name:
