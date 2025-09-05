@@ -1268,8 +1268,8 @@ class VisualizationTab(QWidget):
             drawable_width = page_width_pts - 2 * margin_pts
             drawable_height = page_height_pts - 2 * margin_pts
             
-            header_font = QFont("Arial", 12)
-            item_font = QFont("Arial", 8)
+            header_font = QFont("Arial", 16)
+            item_font = QFont("Arial", 14)
             painter.setFont(header_font)
             header_height = painter.fontMetrics().height() + 20
 
@@ -1344,6 +1344,52 @@ class VisualizationTab(QWidget):
             QMessageBox.warning(self, "Ошибка экспорта PDF", f"Не удалось создать PDF файл:\n{str(e)}")
 
 
+    def _draw_pdf_item_dimensions(self, painter, rect, item_width, item_height):
+        """Вспомогательная функция для отрисовки размеров элемента в PDF."""
+        from PyQt5.QtGui import QPen
+        from PyQt5.QtCore import QPointF, Qt
+
+        # Используем шрифт поменьше для размеров
+        original_font = painter.font()
+        dim_font = painter.font()
+        dim_font.setPointSize(max(12, (original_font.pointSize() - 4) * 2))
+        painter.setFont(dim_font)
+        painter.setPen(QPen(Qt.darkGray, 1))
+
+        font_metrics = painter.fontMetrics()
+        margin = 4  # отступ от края детали
+
+        # РАЗМЕР ПО ШИРИНЕ
+        width_text = f"{item_width:.0f}"
+        width_text_width = font_metrics.horizontalAdvance(width_text)
+
+        # Верхний размер
+        painter.drawText(QPointF(rect.center().x() - width_text_width / 2, rect.top() - margin), width_text)
+        # Нижний размер
+        painter.drawText(QPointF(rect.center().x() - width_text_width / 2, rect.bottom() + font_metrics.ascent() + margin), width_text)
+
+        # РАЗМЕР ПО ВЫСОТЕ
+        height_text = f"{item_height:.0f}"
+        height_text_width = font_metrics.horizontalAdvance(height_text)
+
+        # Левый размер
+        painter.save()
+        painter.translate(rect.left() - font_metrics.ascent() - margin, rect.center().y() + height_text_width / 2)
+        painter.rotate(-90)
+        painter.drawText(QPointF(0, 0), height_text)
+        painter.restore()
+
+        # Правый размер
+        painter.save()
+        painter.translate(rect.right() + margin, rect.center().y() - height_text_width / 2)
+        painter.rotate(90)
+        painter.drawText(QPointF(0, 0), height_text)
+        painter.restore()
+
+        # Восстанавливаем исходный шрифт
+        painter.setFont(original_font)
+
+
     def _draw_pdf_item(self, painter, item, y_offset_on_roll, scale, font):
         """Вспомогательная функция для отрисовки одного элемента в PDF."""
         from PyQt5.QtGui import QPen
@@ -1374,6 +1420,10 @@ class VisualizationTab(QWidget):
         if item.item_type == 'detail' and item.detail:
             if hasattr(item.detail, 'orderno') and item.detail.orderno:
                 text_parts.append(str(item.detail.orderno))
+
+            # Новая строка для номера ячейки
+            if hasattr(item, 'cell_number') and item.cell_number is not None:
+                text_parts.append(f"Ячейка: {item.cell_number}")
             
             line2_parts = []
             if hasattr(item.detail, 'item_name') and item.detail.item_name:
@@ -1398,3 +1448,9 @@ class VisualizationTab(QWidget):
             painter.setFont(font)
             # Простое центрирование текста
             painter.drawText(rect, Qt.AlignCenter, "\n".join(text_parts))
+
+        # Рисуем размеры для деталей
+        if item.item_type == 'detail':
+            painter.save()
+            self._draw_pdf_item_dimensions(painter, rect, item.width, item.height)
+            painter.restore()
