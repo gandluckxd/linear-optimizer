@@ -627,7 +627,7 @@ class APIClient:
             print(f"❌ API Client: Ошибка распределения ячеек: {str(e)}")
             raise Exception(f"Ошибка распределения ячеек: {str(e)}")
 
-    def adjust_materials_altawin(self, grorders_mos_id: int, used_materials: list = None, business_remainders: list = None) -> dict:
+    def adjust_materials_altawin(self, grorders_mos_id: int, used_materials: list = None, business_remainders: list = None, used_fiberglass_sheets: list = None, new_fiberglass_remainders: list = None) -> dict:
         """
         Скорректировать списание и приход материалов в Altawin для оптимизации москитных сеток
         
@@ -635,6 +635,8 @@ class APIClient:
             grorders_mos_id: ID сменного задания москитных сеток
             used_materials: Список использованных материалов [{'goodsid': int, 'length': float, 'quantity': int, 'is_remainder': bool}]
             business_remainders: Список деловых остатков [{'goodsid': int, 'length': float, 'quantity': int}]
+            used_fiberglass_sheets: Список использованных листов/остатков фибергласса
+            new_fiberglass_remainders: Список новых деловых остатков фибергласса
             
         Returns:
             dict: Результат операции
@@ -642,23 +644,17 @@ class APIClient:
         try:
             print(f"🔧 API Client: adjust_materials_altawin вызван с параметрами:")
             print(f"   grorders_mos_id: {grorders_mos_id}")
-            print(f"   used_materials: {len(used_materials) if used_materials else 0} записей")
-            print(f"   business_remainders: {len(business_remainders) if business_remainders else 0} записей")
-            
-            if used_materials:
-                print(f"🔧 API Client: Детализация used_materials:")
-                for i, material in enumerate(used_materials):
-                    print(f"   [{i}] goodsid={material.get('goodsid')}, length={material.get('length')}, quantity={material.get('quantity')}, is_remainder={material.get('is_remainder')}")
-            
-            if business_remainders:
-                print(f"🔧 API Client: Детализация business_remainders:")
-                for i, remainder in enumerate(business_remainders):
-                    print(f"   [{i}] goodsid={remainder.get('goodsid')}, length={remainder.get('length')}, quantity={remainder.get('quantity')}")
-            
+            print(f"   used_materials (профили): {len(used_materials) if used_materials else 0} записей")
+            print(f"   business_remainders (профили): {len(business_remainders) if business_remainders else 0} записей")
+            print(f"   used_fiberglass_sheets: {len(used_fiberglass_sheets) if used_fiberglass_sheets else 0} записей")
+            print(f"   new_fiberglass_remainders: {len(new_fiberglass_remainders) if new_fiberglass_remainders else 0} записей")
+
             payload = {
                 "grorders_mos_id": grorders_mos_id,
                 "used_materials": used_materials or [],
-                "business_remainders": business_remainders or []
+                "business_remainders": business_remainders or [],
+                "used_fiberglass_sheets": used_fiberglass_sheets or [],
+                "new_fiberglass_remainders": new_fiberglass_remainders or []
             }
             
             print(f"🔧 API Client: Отправляем payload на сервер...")

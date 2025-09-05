@@ -1252,14 +1252,22 @@ def delete_optimized_mos_by_grorders_mos_id(grorders_mos_id: int) -> bool:
         raise
 
 
-def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materials: list = None, business_remainders: list = None) -> dict:
+def adjust_materials_for_moskitka_optimization(
+    grorders_mos_id: int, 
+    used_materials: list = None, 
+    business_remainders: list = None,
+    used_fiberglass_sheets: list = None,
+    new_fiberglass_remainders: list = None
+) -> dict:
     """
     Скорректировать списание и приход материалов в Altawin для оптимизации москитных сеток.
     
     Args:
         grorders_mos_id: ID сменного задания москитных сеток
-        used_materials: Список использованных материалов [{'goodsid': int, 'length': float, 'quantity': int, 'is_remainder': bool}]
-        business_remainders: Список деловых остатков [{'goodsid': int, 'length': float, 'quantity': int}]
+        used_materials: Список использованных профилей [{'goodsid': int, 'length': float, 'quantity': int, 'is_remainder': bool}]
+        business_remainders: Список новых деловых остатков профилей [{'goodsid': int, 'length': float, 'quantity': int}]
+        used_fiberglass_sheets: Список использованных листов/остатков фибергласса
+        new_fiberglass_remainders: Список новых деловых остатков фибергласса
         
     Returns:
         dict: Результат операции
@@ -1267,143 +1275,17 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
     operation_start_time = time.time()
     
     try:
-        print(f"🔧 DB: Начало корректировки материалов для москитных сеток grorders_mos_id={grorders_mos_id}")
+        print(f"🔧 DB: Начало корректировки материалов для grorders_mos_id={grorders_mos_id}")
         print(f"🔧 DB: Получены параметры:")
-        print(f"   used_materials: {len(used_materials) if used_materials else 0} записей")
-        print(f"   business_remainders: {len(business_remainders) if business_remainders else 0} записей")
-        
-        if used_materials:
-            print(f"🔧 DB: Детализация used_materials:")
-            for i, material in enumerate(used_materials):
-                print(f"   [{i}] goodsid={material.get('goodsid')}, length={material.get('length')}, quantity={material.get('quantity')}, is_remainder={material.get('is_remainder')}")
-        
-        if business_remainders:
-            print(f"🔧 DB: Детализация business_remainders:")
-            for i, remainder in enumerate(business_remainders):
-                print(f"   [{i}] goodsid={remainder.get('goodsid')}, length={remainder.get('length')}, quantity={remainder.get('quantity')}")
+        print(f"   used_materials (профили): {len(used_materials) if used_materials else 0} записей")
+        print(f"   business_remainders (профили): {len(business_remainders) if business_remainders else 0} записей")
+        print(f"   used_fiberglass_sheets (фибергласс): {len(used_fiberglass_sheets) if used_fiberglass_sheets else 0} записей")
+        print(f"   new_fiberglass_remainders (фибергласс): {len(new_fiberglass_remainders) if new_fiberglass_remainders else 0} записей")
         
         con = get_db_connection()
         cur = con.cursor()
-        
-        # 1. Получаем все связанные grorderid по grorders_mos_id
-        grorder_ids = get_grorder_ids_by_grorders_mos_id(grorders_mos_id)
-        if not grorder_ids:
-            return {
-                "success": False,
-                "error": f"Не найдено связанных сменных заданий для grorders_mos_id={grorders_mos_id}"
-            }
-        
-        print(f"🔧 DB: Найдено {len(grorder_ids)} связанных сменных заданий: {grorder_ids}")
-        
-        # 2. Удаляем материалы типа "профили москитной сетки" из всех списаний
-        print(f"🔧 DB: Удаление материалов типа 'профили москитной сетки' из списаний...")
-        deleted_outlay_count = 0
-        
-        for grorder_id in grorder_ids:
-            # Ищем списание для текущего grorder
-            outlay_sql = """
-            SELECT outlayid FROM outlay 
-            WHERE grorderid = ? AND deleted = 0
-            ORDER BY outlayid
-            """
-            cur.execute(outlay_sql, (grorder_id,))
-            outlay_result = cur.fetchone()
-            
-            if outlay_result:
-                outlay_id = outlay_result[0]
-                print(f"🔧 DB: Обрабатываем списание outlayid={outlay_id} для grorderid={grorder_id}")
-                
-                # Удаляем элементы списания с профилями москитных сеток (ggtypeid = 48)
-                delete_outlay_detail_sql = """
-                DELETE FROM outlaydetail WHERE outlaydetailid IN (
-                    SELECT ot.outlaydetailid
-                    FROM outlaydetail ot
-                    JOIN goods g ON g.goodsid = ot.goodsid
-                    JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid
-                    WHERE ot.outlayid = ? AND gg.ggtypeid = 48
-                )
-                """
-                cur.execute(delete_outlay_detail_sql, (outlay_id,))
-                deleted_details = cur.rowcount
-                deleted_outlay_count += deleted_details
-                print(f"🔧 DB: Удалено {deleted_details} элементов списания профилей москитных сеток")
-                
-                # Удаляем остатки из списания с профилями москитных сеток
-                delete_outlay_remainder_sql = """
-                DELETE FROM outlayremainder WHERE outlayremainderid IN (
-                    SELECT otr.outlayremainderid
-                    FROM outlayremainder otr
-                    JOIN goods g ON g.goodsid = otr.goodsid
-                    JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid
-                    WHERE otr.outlayid = ? AND gg.ggtypeid = 48
-                )
-                """
-                cur.execute(delete_outlay_remainder_sql, (outlay_id,))
-                deleted_remainders = cur.rowcount
-                deleted_outlay_count += deleted_remainders
-                print(f"🔧 DB: Удалено {deleted_remainders} остатков профилей москитных сеток из списания")
-        
-        print(f"🔧 DB: Всего удалено {deleted_outlay_count} записей из списаний")
-        
-        # Коммитим удаление данных из списаний
-        con.commit()
-        print(f"🔧 DB: Зафиксированы изменения после удаления данных из списаний")
-        
-        # 3. Удаляем материалы типа "профили москитной сетки" из всех приходов
-        print(f"🔧 DB: Удаление материалов типа 'профили москитной сетки' из приходов...")
-        deleted_supply_count = 0
-        
-        for grorder_id in grorder_ids:
-            # Ищем приход для текущего grorder
-            supply_sql = """
-            SELECT supplyid FROM supply 
-            WHERE grorderid = ? AND supplytype = 1 AND deleted = 0
-            ORDER BY supplyid
-            """
-            cur.execute(supply_sql, (grorder_id,))
-            supply_result = cur.fetchone()
-            
-            if supply_result:
-                supply_id = supply_result[0]
-                print(f"🔧 DB: Обрабатываем приход supplyid={supply_id} для grorderid={grorder_id}")
-                
-                # Удаляем элементы прихода с профилями москитных сеток
-                delete_supply_detail_sql = """
-                DELETE FROM supplydetail WHERE supplydetailid IN (
-                    SELECT sd.supplydetailid
-                    FROM supplydetail sd
-                    JOIN goods g ON g.goodsid = sd.goodsid
-                    JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid
-                    WHERE sd.supplyid = ? AND gg.ggtypeid = 48
-                )
-                """
-                cur.execute(delete_supply_detail_sql, (supply_id,))
-                deleted_details = cur.rowcount
-                deleted_supply_count += deleted_details
-                print(f"🔧 DB: Удалено {deleted_details} элементов прихода профилей москитных сеток")
-                
-                # Удаляем остатки из прихода с профилями москитных сеток
-                delete_supply_remainder_sql = """
-                DELETE FROM supplyremainder WHERE supplyremainderid IN (
-                    SELECT sr.supplyremainderid
-                    FROM supplyremainder sr
-                    JOIN goods g ON g.goodsid = sr.goodsid
-                    JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid
-                    WHERE sr.supplyid = ? AND gg.ggtypeid = 48
-                )
-                """
-                cur.execute(delete_supply_remainder_sql, (supply_id,))
-                deleted_remainders = cur.rowcount
-                deleted_supply_count += deleted_remainders
-                print(f"🔧 DB: Удалено {deleted_remainders} остатков профилей москитных сеток из прихода")
-        
-        print(f"🔧 DB: Всего удалено {deleted_supply_count} записей из приходов")
-        
-        # Коммитим удаление данных из приходов
-        con.commit()
-        print(f"🔧 DB: Зафиксированы изменения после удаления данных из приходов")
-        
-        # 4. Создаем новое списание материалов для всех grorder
+
+        # 1. Создаем новое списание материалов для всех grorder
         print(f"🔧 DB: Создание нового списания материалов...")
         
         # Получаем информацию о сменном задании москитных сеток для комментария
@@ -1445,7 +1327,7 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
         outlay_id = cur.fetchone()[0]
         print(f"🔧 DB: Создано новое списание outlayid={outlay_id}")
         
-        # 5. Создаем новый приход материалов для деловых остатков
+        # 2. Создаем новый приход материалов для деловых остатков
         print(f"🔧 DB: Создание нового прихода материалов...")
         
         # Создаем приход
@@ -1471,12 +1353,12 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
         supply_id = cur.fetchone()[0]
         print(f"🔧 DB: Создан новый приход supplyid={supply_id}")
         
-        # 6. Заполняем созданные документы материалами
+        # 3. Заполняем созданные документы материалами
         print(f"🔧 DB: Заполнение документов материалами...")
         
         # Заполняем списание использованными материалами
         if used_materials:
-            print(f"🔧 DB: Добавление {len(used_materials)} использованных материалов в списание...")
+            print(f"🔧 DB: Добавление {len(used_materials)} использованных профилей в списание...")
             
             for material in used_materials:
                 goodsid = material.get('goodsid')
@@ -1542,9 +1424,53 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
                     cur.execute(insert_outlay_detail_sql, (outlay_id, goodsid, correct_quantity, measureid))
                     print(f"🔧 DB: Добавлен использованный материал goodsid={goodsid}, количество={quantity}шт * {thick}мм = {correct_quantity}мм в outlaydetail")
         
+        if used_fiberglass_sheets:
+            print(f"🔧 DB: Добавление {len(used_fiberglass_sheets)} использованных листов/остатков фибергласса в списание...")
+            for sheet in used_fiberglass_sheets:
+                goodsid = sheet.get('goodsid')
+                quantity = sheet.get('quantity', 0)
+                if not goodsid or quantity <= 0:
+                    continue
+                
+                if sheet.get('is_remainder'):
+                    # Списываем использованный деловой остаток фибергласса (OUTLAYREMAINDER)
+                    width = sheet.get('width', 0)
+                    height = sheet.get('height', 0)
+                    insert_outlay_remainder_sql = """
+                    INSERT INTO OUTLAYREMAINDER (
+                        OUTLAYREMAINDERID, OUTLAYID, GOODSID, ISAPPROVED, 
+                        THICK, WIDTH, HEIGHT, QTY, SELLERPRICE, SELLERCURRENCYID
+                    ) VALUES (
+                        gen_id(gen_outlayremainder, 1), ?, ?, 0, 
+                        0, ?, ?, ?, 0, 1
+                    )
+                    """
+                    cur.execute(insert_outlay_remainder_sql, (outlay_id, goodsid, int(width), int(height), quantity))
+                    print(f"🔧 DB: ✅ Списан остаток фибергласса: goodsid={goodsid}, {width}x{height}, кол-во={quantity}")
+                else:
+                    # Списываем целый рулон фибергласса (OUTLAYDETAIL)
+                    # Расчет количества в базовых единицах (м2)
+                    measure_sql = "SELECT ggm.measureid, m.amfactor, gg.width, gg.height FROM goods g JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid JOIN grgoodsmeasure ggm ON ggm.grgoodsid = gg.grgoodsid JOIN measure m ON m.measureid = ggm.measureid WHERE g.goodsid = ? AND ggm.ismain = 1"
+                    cur.execute(measure_sql, (goodsid,))
+                    measure_result = cur.fetchone()
+                    
+                    if measure_result:
+                        measureid, amfactor, roll_width, roll_height = measure_result
+                        total_area_m2 = (roll_width * roll_height / 1_000_000) * quantity
+                        correct_quantity = total_area_m2 * amfactor
+                        
+                        insert_outlay_detail_sql = """
+                        INSERT INTO OUTLAYDETAIL (OUTLAYDETAILID, OUTLAYID, GOODSID, QTY, MEASUREID, ISAPPROVED, SELLERPRICE, SELLERCURRENCYID) 
+                        VALUES (gen_id(gen_outlaydetail, 1), ?, ?, ?, ?, 0, 0, 1)
+                        """
+                        cur.execute(insert_outlay_detail_sql, (outlay_id, goodsid, correct_quantity, measureid))
+                        print(f"🔧 DB: ✅ Списан рулон фибергласса: goodsid={goodsid}, кол-во={quantity}шт, площадь={total_area_m2}м2, списано_кол-во={correct_quantity}")
+                    else:
+                        print(f"⚠️ DB: Не найдены единицы измерения для списания рулона фибергласса goodsid={goodsid}")
+
         # Заполняем приход деловыми остатками
         if business_remainders:
-            print(f"🔧 DB: Добавление {len(business_remainders)} деловых остатков в приход...")
+            print(f"🔧 DB: Добавление {len(business_remainders)} деловых остатков профилей в приход...")
             
             for remainder in business_remainders:
                 goodsid = remainder.get('goodsid')
@@ -1588,10 +1514,38 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
                 )
                 """
                 cur.execute(insert_supply_remainder_sql, (supply_id, goodsid, int(length), correct_quantity, price))
-                print(f"🔧 DB: Добавлен деловой остаток в SUPPLYREMAINDER goodsid={goodsid}, длина={length}, количество={quantity}шт * {thick}мм = {correct_quantity}мм")
-                
-
+                print(f"🔧 DB: Добавлен деловой остаток профиля в SUPPLYREMAINDER goodsid={goodsid}, длина={length}, количество={quantity}шт")
         
+        if new_fiberglass_remainders:
+            print(f"🔧 DB: Добавление {len(new_fiberglass_remainders)} новых остатков фибергласса в приход...")
+            for remainder in new_fiberglass_remainders:
+                goodsid = remainder.get('goodsid')
+                quantity = remainder.get('quantity', 0)
+                width = remainder.get('width', 0)
+                height = remainder.get('height', 0)
+
+                if not goodsid or quantity <= 0 or width <= 0 or height <= 0:
+                    continue
+
+                # Получаем стоимость товара для прихода
+                price_sql = "SELECT COALESCE(g.price1, 0) as price FROM goods g WHERE g.goodsid = ?"
+                cur.execute(price_sql, (goodsid,))
+                price_result = cur.fetchone()
+                price = price_result[0] if price_result else 0
+
+                # Добавляем деловой остаток фибергласса в приход (SUPPLYREMAINDER)
+                insert_supply_remainder_sql = """
+                INSERT INTO SUPPLYREMAINDER (
+                    SUPPLYREMAINDERID, SUPPLYID, GOODSID, ISAPPROVED, 
+                    THICK, WIDTH, HEIGHT, QTY, SELLERPRICE, SELLERCURRENCYID
+                ) VALUES (
+                    gen_id(gen_supplyremainder, 1), ?, ?, 0, 
+                    0, ?, ?, ?, ?, 1
+                )
+                """
+                cur.execute(insert_supply_remainder_sql, (supply_id, goodsid, int(width), int(height), quantity, price))
+                print(f"🔧 DB: ✅ Оприходован новый остаток фибергласса: goodsid={goodsid}, {width}x{height}, кол-во={quantity}шт")
+
         # Фиксируем изменения
         con.commit()
         con.close()
@@ -1604,9 +1558,6 @@ def adjust_materials_for_moskitka_optimization(grorders_mos_id: int, used_materi
             "message": "Материалы успешно скорректированы",
             "outlay_id": outlay_id,
             "supply_id": supply_id,
-            "deleted_outlay_count": deleted_outlay_count,
-            "deleted_supply_count": deleted_supply_count,
-            "grorder_ids": grorder_ids,
             "performance": {
                 "total_time": round(total_time, 2)
             }

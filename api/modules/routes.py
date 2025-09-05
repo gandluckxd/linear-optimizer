@@ -439,25 +439,23 @@ async def adjust_materials_altawin(request: dict):
         used_materials = request.get('used_materials', [])  # Список использованных материалов
         business_remainders = request.get('business_remainders', [])  # Список деловых остатков
         
+        # Новые данные для фибергласса
+        used_fiberglass_sheets = request.get('used_fiberglass_sheets', [])
+        new_fiberglass_remainders = request.get('new_fiberglass_remainders', [])
+
         print(f"🔧 API: Получены данные:")
         print(f"   grorders_mos_id: {grorders_mos_id}")
-        print(f"   used_materials: {len(used_materials)} записей")
-        print(f"   business_remainders: {len(business_remainders)} записей")
-        
-        if used_materials:
-            print(f"🔧 API: Детализация used_materials:")
-            for i, material in enumerate(used_materials):
-                print(f"   [{i}] goodsid={material.get('goodsid')}, length={material.get('length')}, quantity={material.get('quantity')}, is_remainder={material.get('is_remainder')}")
-        
-        if business_remainders:
-            print(f"🔧 API: Детализация business_remainders:")
-            for i, remainder in enumerate(business_remainders):
-                print(f"   [{i}] goodsid={remainder.get('goodsid')}, length={remainder.get('length')}, quantity={remainder.get('quantity')}")
+        print(f"   used_materials (профили): {len(used_materials)} записей")
+        print(f"   business_remainders (профили): {len(business_remainders)} записей")
+        print(f"   used_fiberglass_sheets: {len(used_fiberglass_sheets)} записей")
+        print(f"   new_fiberglass_remainders: {len(new_fiberglass_remainders)} записей")
         
         result = adjust_materials_for_moskitka_optimization(
             grorders_mos_id, 
             used_materials, 
-            business_remainders
+            business_remainders,
+            used_fiberglass_sheets,
+            new_fiberglass_remainders
         )
         return result
         

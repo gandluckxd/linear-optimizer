@@ -1673,29 +1673,64 @@ class LinearOptimizerWindow(QMainWindow):
                     print(f"   used_materials: {len(used_materials)} записей")
                     print(f"   business_remainders: {len(business_remainders)} записей")
                     
+                    # НОВОЕ: Формируем данные для фибергласса
+                    used_fiberglass_sheets = []
+                    new_fiberglass_remainders = []
+
+                    if self.fabric_optimization_result and self.fabric_optimization_result.layouts:
+                        print("🔧 DEBUG: Формирование данных по фиберглассу для отправки...")
+                        # 1. Собираем использованные листы и остатки
+                        for layout in self.fabric_optimization_result.layouts:
+                            sheet = layout.sheet
+                            used_sheet_data = {
+                                "goodsid": sheet.goodsid,
+                                "marking": sheet.marking,
+                                "width": sheet.width,
+                                "height": sheet.height,
+                                "is_remainder": sheet.is_remainder,
+                                "remainder_id": sheet.remainder_id,
+                                "quantity": 1 # Каждый layout - это один использованный лист/остаток
+                            }
+                            used_fiberglass_sheets.append(used_sheet_data)
+
+                        # 2. Собираем новые деловые остатки
+                        for layout in self.fabric_optimization_result.layouts:
+                             for item in layout.get_remnants():
+                                new_remainder_data = {
+                                    "goodsid": layout.sheet.goodsid, # goodsid от родительского листа
+                                    "marking": layout.sheet.marking,
+                                    "width": item.width,
+                                    "height": item.height,
+                                    "quantity": 1 # Каждый остаток - это одна штука
+                                }
+                                new_fiberglass_remainders.append(new_remainder_data)
+                        
+                        print(f"   used_fiberglass_sheets: {len(used_fiberglass_sheets)} записей")
+                        print(f"   new_fiberglass_remainders: {len(new_fiberglass_remainders)} записей")
+
                     result = self.api_client.adjust_materials_altawin(
                         grorders_mos_id, 
                         used_materials, 
-                        business_remainders
+                        business_remainders,
+                        used_fiberglass_sheets,
+                        new_fiberglass_remainders
                     )
                     
                     if result.get('success'):
-                        deleted_outlay = result.get('deleted_outlay_count', 0)
-                        deleted_supply = result.get('deleted_supply_count', 0)
                         outlay_id = result.get('outlay_id')
                         supply_id = result.get('supply_id')
                         
-                        self.status_bar.showMessage(f"Материалы скорректированы: удалено {deleted_outlay + deleted_supply} записей")
+                        self.status_bar.showMessage(f"Материалы скорректированы")
                         
                         # Показываем информацию о созданных документах
                         info_msg = (
                             f"Материалы успешно скорректированы!\n\n"
-                            f"Удалено записей из списаний: {deleted_outlay}\n"
-                            f"Удалено записей из приходов: {deleted_supply}\n"
                             f"Создано новое списание: {outlay_id}\n"
                             f"Создан новый приход: {supply_id}\n\n"
-                            f"Добавлено материалов в списание: {len(used_materials)}\n"
-                            f"Добавлено деловых остатков в приход: {len(business_remainders)}"
+                            f"Добавлено материалов (профили) в списание: {len(used_materials)}\n"
+                            f"Добавлено деловых остатков (профили) в приход: {len(business_remainders)}\n"
+                            f"Добавлено материалов (фибергласс) в списание: {len(used_fiberglass_sheets)}\n"
+                            f"Добавлено деловых остатков (фибергласс) в приход: {len(new_fiberglass_remainders)}"
                         )
                         QMessageBox.information(self, "Корректировка материалов", info_msg)
                     else:
