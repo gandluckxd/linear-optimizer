@@ -824,7 +824,7 @@ class LinearOptimizerWindow(QMainWindow):
         
         # Галочка для корректировки материалов в Altawin
         self.adjust_materials_checkbox = QCheckBox("Скорректировать списание материалов в Altawin")
-        self.adjust_materials_checkbox.setChecked(False)
+        self.adjust_materials_checkbox.setChecked(True)
         self.adjust_materials_checkbox.setStyleSheet("QCheckBox { color: #e0e0e0; font-weight: bold; }")
         upload_layout.addWidget(self.adjust_materials_checkbox)
         
@@ -1478,7 +1478,7 @@ class LinearOptimizerWindow(QMainWindow):
         self.tabs.setCurrentIndex(0)
 
         # Сбрасываем галочку корректировки материалов
-        self.adjust_materials_checkbox.setChecked(False)
+        self.adjust_materials_checkbox.setChecked(True)
 
     def on_upload_mos_clicked(self):
         """Загрузка данных оптимизации в OPTIMIZED_MOS/OPTDETAIL_MOS"""
