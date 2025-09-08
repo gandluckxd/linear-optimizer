@@ -18,7 +18,7 @@ class APIClient:
         try:
             response = self.session.get(f"{self.base_url}/api/test-connection", timeout=5)
             return response.status_code == 200
-        except:
+        except requests.RequestException:
             return False
     
     def get_profiles(self, order_id: int) -> List[Profile]:
@@ -426,7 +426,7 @@ class APIClient:
         try:
             print(f"🔧 API Client: *** ИСПРАВЛЕННАЯ ВЕРСИЯ *** Начало загрузки данных оптимизации для grorders_mos_id={grorders_mos_id}")
             print(f"🔧 API Client: Количество планов распила: {len(result.cut_plans) if result.cut_plans else 0}")
-            print(f"🔧 API Client: *** ВЕРСИЯ С ИСПРАВЛЕНИЕМ ORDERID ***")
+            print("🔧 API Client: *** ВЕРСИЯ С ИСПРАВЛЕНИЕМ ORDERID ***")
             
             if not result or not getattr(result, 'cut_plans', None):
                 raise Exception("Нет данных оптимизации для выгрузки")
@@ -436,12 +436,12 @@ class APIClient:
             profile_orderids = set(p.order_id for p in profiles)
             print(f"🔧 API Client: Профили содержат {len(profiles)} записей из {len(profile_orderids)} заказов")
             print(f"🔧 API Client: Список orderid в профилях: {sorted(profile_orderids)}")
-            print(f"🔧 API Client: Теперь order_id будет браться прямо из результатов оптимизации")
+            print("🔧 API Client: Теперь order_id будет браться прямо из результатов оптимизации")
 
             # Очистка предыдущих данных для текущего сменного задания
             print(f"🔧 API Client: Очистка предыдущих данных для grorders_mos_id={grorders_mos_id}")
             self.delete_optimized_mos_by_grorders_mos_id(grorders_mos_id)
-            print(f"✅ API Client: Предыдущие данные очищены")
+            print("✅ API Client: Предыдущие данные очищены")
 
             # Основная выгрузка
             total_optimized_mos = 0
@@ -493,84 +493,83 @@ class APIClient:
                 border_value = int((begin_indent_mm or 0) + (end_indent_mm or 0))
                 plan_count = int(getattr(plan, 'count', 1) or 1)
 
-                print(f"🔧 API Client: Создание {plan_count} записей OPTIMIZED_MOS для плана {plan_index + 1}")
+                print(f"🔧 API Client: Создание ОДНОЙ записи OPTIMIZED_MOS для плана {plan_index + 1} с QTY={plan_count}")
 
-                for bar_index in range(1, plan_count + 1):
-                    optimized_payload = {
-                        "grorder_mos_id": int(grorders_mos_id),
-                        "goodsid": int(main_goodsid or 0),
-                        "qty": 1,  # одна запись на один хлыст
-                        "isbar": isbar_value,
-                        "longprof": stock_length,
-                        "cutwidth": int(blade_width_mm),
-                        "border": border_value,
-                        "minrest": int(min_remainder_mm),
-                        "mintrash": int(min_trash_mm),
-                        "map": cut_map,
-                        "ostat": float(ostat),
-                        "sumprof": float(sumprof),
-                        "restpercent": float(restpercent),
-                        "trashpercent": float(trashpercent),
-                        "beginindent": int(begin_indent_mm or 0),
-                        "endindent": int(end_indent_mm or 0),
-                        "sumtrash": float(waste) if waste else None,
-                    }
+                optimized_payload = {
+                    "grorder_mos_id": int(grorders_mos_id),
+                    "goodsid": int(main_goodsid or 0),
+                    "qty": plan_count,  # одна запись на группу одинаковых хлыстов
+                    "isbar": isbar_value,
+                    "longprof": stock_length,
+                    "cutwidth": int(blade_width_mm),
+                    "border": border_value,
+                    "minrest": int(min_remainder_mm),
+                    "mintrash": int(min_trash_mm),
+                    "map": cut_map,
+                    "ostat": float(ostat),
+                    "sumprof": float(sumprof),
+                    "restpercent": float(restpercent),
+                    "trashpercent": float(trashpercent),
+                    "beginindent": int(begin_indent_mm or 0),
+                    "endindent": int(end_indent_mm or 0),
+                    "sumtrash": float(waste) if waste else None,
+                }
 
-                    print(f"🔧 API Client: Создание OPTIMIZED_MOS {bar_index}/{plan_count} для плана {plan_index + 1}")
-                    optimized_resp = self.create_optimized_mos(optimized_payload)
-                    optimized_mos_id = int(optimized_resp.get("id"))
-                    total_optimized_mos += 1
-                    print(f"✅ API Client: OPTIMIZED_MOS создан с ID {optimized_mos_id}")
+                print(f"🔧 API Client: Создание OPTIMIZED_MOS для плана {plan_index + 1}")
+                optimized_resp = self.create_optimized_mos(optimized_payload)
+                optimized_mos_id = int(optimized_resp.get("id"))
+                total_optimized_mos += 1
+                print(f"✅ API Client: OPTIMIZED_MOS создан с ID {optimized_mos_id}")
 
-                    # Детали распила для текущего хлыста
-                    subnum_counter = 1
+                # Детали распила для текущего хлыста
+                subnum_counter = 1
+                
+                for c in cuts:
+                    length_val = float(c.get('length', 0) or 0)
+                    qty_val = int(c.get('quantity', 0) or 0)
+                    pid = int(c.get('profile_id', 0) or 0)
                     
-                    for c in cuts:
-                        length_val = float(c.get('length', 0) or 0)
-                        qty_val = int(c.get('quantity', 0) or 0)
-                        pid = int(c.get('profile_id', 0) or 0)
-                        
-                        # Подробная отладка содержимого cut
-                        print(f"🔍 API Client: Содержимое cut: {c}")
-                        
-                        # *** ИСПРАВЛЕНО *** order_id берется прямо из результатов оптимизации
-                        # Это корректный ORDERID из таблицы ORDERS, который передается в OPTDETAIL_MOS
-                        final_orderid = int(c.get('order_id', 0) or 0)
+                    # Подробная отладка содержимого cut
+                    print(f"🔍 API Client: Содержимое cut: {c}")
+                    
+                    # *** ИСПРАВЛЕНО *** order_id берется прямо из результатов оптимизации
+                    # Это корректный ORDERID из таблицы ORDERS, который передается в OPTDETAIL_MOS
+                    final_orderid = int(c.get('order_id', 0) or 0)
 
-                        if qty_val <= 0 or length_val <= 0:
-                            continue
+                    if qty_val <= 0 or length_val <= 0:
+                        continue
 
-                        # Отладочная информация
-                        if final_orderid == 0:
-                            print(f"⚠️ API Client: Для детали goodsid={pid} не найден order_id в результатах оптимизации!")
-                        
-                        print(f"🔧 API Client: Деталь {subnum_counter}: goodsid={pid}, orderid={final_orderid}, длина={length_val}, кол-во={qty_val}")
+                    # Отладочная информация
+                    if final_orderid == 0:
+                        print(f"⚠️ API Client: Для детали goodsid={pid} не найден order_id в результатах оптимизации!")
+                    
+                    print(f"🔧 API Client: Деталь {subnum_counter}: goodsid={pid}, orderid={final_orderid}, длина={length_val}, кол-во={qty_val}")
 
-                        detail_payload = {
-                            "optimized_mos_id": optimized_mos_id,
-                            "orderid": final_orderid,
-                            "qty": int(qty_val),
-                            "itemsdetailid": c.get('itemsdetailid'),
-                            "itemlong": float(length_val),
-                            "ug1": None,
-                            "ug2": None,
-                            "num": bar_index,  # номер хлыста в плане
-                            "subnum": subnum_counter,
-                            "long_al": float(length_val) + float(blade_width_mm),
-                            "izdpart": c.get('izdpart'),
-                            "partside": None,
-                            "modelno": None,
-                            "modelheight": None,
-                            "modelwidth": None,
-                            "flugelopentype": None,
-                            "flugelcount": None,
-                            "ishandle": None,
-                            "handlepos": None,
-                            "handleposfalts": None,
-                            "flugelopentag": None,
-                        }
-                        optdetail_payloads.append(detail_payload)
-                        subnum_counter += 1
+                    detail_payload = {
+                        "optimized_mos_id": optimized_mos_id,
+                        "orderid": final_orderid,
+                        "qty": int(qty_val),
+                        "itemsdetailid": c.get('itemsdetailid'),
+                        "itemlong": float(length_val),
+                        "ug1": None,
+                        "ug2": None,
+                        "num": 1,  # номер хлыста в плане (для группы ставим 1)
+                        "subnum": subnum_counter,
+                        "long_al": float(length_val) + float(blade_width_mm),
+                        "izdpart": c.get('izdpart'),
+                        "partside": None,
+                        "modelno": None,
+                        "modelheight": None,
+                        "modelwidth": None,
+                        "flugelopentype": None,
+                        "flugelcount": None,
+                        "ishandle": None,
+                        "handlepos": None,
+                        "handleposfalts": None,
+                        "flugelopentag": None,
+                    }
+                    optdetail_payloads.append(detail_payload)
+                    subnum_counter += 1
             
             # Массовая вставка всех деталей одним запросом
             if optdetail_payloads:
@@ -580,7 +579,7 @@ class APIClient:
                 print("⚠️ API Client: Нет деталей для вставки в OPTDETAIL_MOS.")
 
 
-            print(f"✅ API Client: Загрузка данных завершена успешно!")
+            print("✅ API Client: Загрузка данных завершена успешно!")
             print(f"✅ API Client: Создано записей OPTIMIZED_MOS: {total_optimized_mos}")
             print(f"✅ API Client: Создано записей OPTDETAIL_MOS: {len(optdetail_payloads)}")
             
@@ -626,8 +625,7 @@ class APIClient:
             
             return result
             
-        except Exception as e:
-            print(f"❌ API Client: Ошибка распределения ячеек: {str(e)}")
+        except requests.RequestException as e:
             raise Exception(f"Ошибка распределения ячеек: {str(e)}")
 
     def adjust_materials_altawin(self, grorders_mos_id: int, used_materials: list = None, business_remainders: list = None, used_fiberglass_sheets: list = None, new_fiberglass_remainders: list = None) -> dict:
@@ -645,7 +643,7 @@ class APIClient:
             dict: Результат операции
         """
         try:
-            print(f"🔧 API Client: adjust_materials_altawin вызван с параметрами:")
+            print("🔧 API Client: adjust_materials_altawin вызван с параметрами:")
             print(f"   grorders_mos_id: {grorders_mos_id}")
             print(f"   used_materials (профили): {len(used_materials) if used_materials else 0} записей")
             print(f"   business_remainders (профили): {len(business_remainders) if business_remainders else 0} записей")
@@ -660,7 +658,7 @@ class APIClient:
                 "new_fiberglass_remainders": new_fiberglass_remainders or []
             }
             
-            print(f"🔧 API Client: Отправляем payload на сервер...")
+            print("🔧 API Client: Отправляем payload на сервер...")
             response = self.session.post(
                 f"{self.base_url}/api/adjust-materials-altawin",
                 json=payload,

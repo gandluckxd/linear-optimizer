@@ -6,9 +6,8 @@
 """
 
 import time
-from typing import List, Dict, Optional, Any
-from dataclasses import dataclass, field
-from datetime import datetime
+from typing import List, Dict, Any
+from dataclasses import dataclass
 
 # Импорт моделей
 from .models import Profile, Stock, CutPlan, OptimizationResult, Piece
@@ -176,7 +175,7 @@ class SimpleOptimizer:
                 
                 # Проверяем корректность подсчета
                 if total_pieces_placed != total_pieces_needed:
-                    print(f"⚠️ ВНИМАНИЕ: Несоответствие в подсчете деталей!")
+                    print("⚠️ ВНИМАНИЕ: Несоответствие в подсчете деталей!")
                     print(f"   Нужно: {total_pieces_needed}")
                     print(f"   Размещено: {total_pieces_placed}")
                     print(f"   Разница: {total_pieces_placed - total_pieces_needed}")
@@ -193,9 +192,9 @@ class SimpleOptimizer:
                     print(f"   Исправленный подсчет: {corrected_total}")
                     if corrected_total == total_pieces_needed:
                         total_pieces_placed = corrected_total
-                        print(f"   ✅ Подсчет исправлен!")
+                        print("   ✅ Подсчет исправлен!")
                     else:
-                        print(f"   ❌ Подсчет все еще некорректен!")
+                        print("   ❌ Подсчет все еще некорректен!")
                 
                 result.statistics['total_pieces_needed'] = int(total_pieces_needed)
                 result.statistics['total_pieces_placed'] = int(total_pieces_placed)
@@ -218,7 +217,7 @@ class SimpleOptimizer:
                     print(f"📊 Эффективность размещения: {result.statistics['placement_efficiency']}%")
                 else:
                     print(f"✅ ВСЕ детали успешно размещены! ({total_pieces_placed}/{total_pieces_needed})")
-                    print(f"📊 Эффективность размещения: 100%")
+                    print("📊 Эффективность размещения: 100%")
                     
             except Exception as stats_err:
                 print(f"⚠️ Ошибка расчета статистики деталей: {stats_err}")
@@ -245,59 +244,20 @@ class SimpleOptimizer:
         
         # Создаем список всех кусков для размещения с использованием новой модели Piece
         pieces_to_place = []
-
-        if self.settings.pair_optimization:
-            print("🔧 Парная оптимизация включена.")
-            for profile in profiles:
-                num_pairs = profile.quantity // 2
-                num_singles = profile.quantity % 2
-
-                # Создаем парные детали
-                for i in range(num_pairs):
-                    piece = Piece(
-                        profile_id=profile.id,
-                        profile_code=profile.profile_code,
-                        length=profile.length,
-                        element_name=profile.element_name,
-                        order_id=profile.order_id,
-                        piece_id=f"pair_{profile.id}_{profile.length}_{profile.order_id}_{i}",
-                        orderitemsid=profile.orderitemsid,
-                        izdpart=profile.izdpart,
-                        itemsdetailid=profile.itemsdetailid,
-                        quantity=2
-                    )
-                    pieces_to_place.append(piece)
-
-                # Создаем одиночные детали
-                if num_singles > 0:
-                    piece = Piece(
-                        profile_id=profile.id,
-                        profile_code=profile.profile_code,
-                        length=profile.length,
-                        element_name=profile.element_name,
-                        order_id=profile.order_id,
-                        piece_id=f"single_{profile.id}_{profile.length}_{profile.order_id}_{profile.quantity-1}",
-                        orderitemsid=profile.orderitemsid,
-                        izdpart=profile.izdpart,
-                        itemsdetailid=profile.itemsdetailid,
-                        quantity=1
-                    )
-                    pieces_to_place.append(piece)
-        else:
-            for profile in profiles:
-                for i in range(profile.quantity):
-                    piece = Piece(
-                        profile_id=profile.id,
-                        profile_code=profile.profile_code,
-                        length=profile.length,
-                        element_name=profile.element_name,
-                        order_id=profile.order_id,
-                        piece_id=f"{profile.id}_{profile.length}_{profile.order_id}_{i}",
-                        orderitemsid=profile.orderitemsid,
-                        izdpart=profile.izdpart,
-                        itemsdetailid=profile.itemsdetailid
-                    )
-                    pieces_to_place.append(piece)
+        for profile in profiles:
+            for i in range(profile.quantity):
+                piece = Piece(
+                    profile_id=profile.id,
+                    profile_code=profile.profile_code,
+                    length=profile.length,
+                    element_name=profile.element_name,
+                    order_id=profile.order_id,
+                    piece_id=f"{profile.id}_{profile.length}_{profile.order_id}_{i}",
+                    orderitemsid=profile.orderitemsid,
+                    izdpart=profile.izdpart,
+                    itemsdetailid=profile.itemsdetailid
+                )
+                pieces_to_place.append(piece)
         
         # Распределяем номера ячеек
         self._distribute_cells_for_profiles(pieces_to_place)
@@ -455,7 +415,7 @@ class SimpleOptimizer:
                         print(f"✅ План автоматически исправлен! Создано планов: {len(corrected_plans)}")
                         cut_plans.extend(corrected_plans)
                     else:
-                        print(f"❌ Не удалось автоматически исправить план")
+                        print("❌ Не удалось автоматически исправить план")
                         cut_plans.append(cut_plan)  # Добавляем как есть
                 else:
                     cut_plans.append(cut_plan)
@@ -562,9 +522,7 @@ class SimpleOptimizer:
                 return False
             
             # ЖЕСТКАЯ ПРОВЕРКА: деталь должна поместиться в хлыст
-            needed_length = piece.length * piece.quantity
-            if piece.quantity > 1:
-                needed_length += self.settings.blade_width * (piece.quantity - 1)
+            needed_length = piece.length
             
             # Добавляем ширину пропила если уже есть распилы
             if stock['cuts_count'] > 0:
@@ -594,14 +552,14 @@ class SimpleOptimizer:
             
             if existing_cut:
                 # Увеличиваем количество
-                existing_cut['quantity'] += piece.quantity
+                existing_cut['quantity'] += 1
             else:
                 # Создаем новый распил
                 cut_data = {
                     'profile_id': piece.profile_id,
                     'profile_code': piece.profile_code,  # Добавляем артикул профиля
                     'length': piece.length,
-                    'quantity': piece.quantity,
+                    'quantity': 1,
                     'order_id': piece.order_id,  # Добавляем order_id для точного маппинга
                     'cell_number': piece.cell_number, # Добавляем номер ячейки
                     'itemsdetailid': piece.itemsdetailid # Добавляем ID детали
@@ -612,7 +570,7 @@ class SimpleOptimizer:
             # Обновляем использованную длину и счетчик
             # Используем только needed_length, так как он уже включает ширину пропила
             stock['used_length'] += needed_length
-            stock['cuts_count'] += piece.quantity
+            stock['cuts_count'] += 1
             
             # Помечаем деталь как распределенную
             try:
@@ -870,7 +828,7 @@ class SimpleOptimizer:
                 })
         
         if validation_result["has_duplicates"]:
-            print(f"❌ Обнаружены дублирующиеся деловые остатки:")
+            print("❌ Обнаружены дублирующиеся деловые остатки:")
             for duplicate in validation_result["duplicates"]:
                 print(f"   {duplicate['issue']}")
                 print(f"   Stock IDs: {duplicate['stock_ids']}")
@@ -963,7 +921,7 @@ class SimpleOptimizer:
                 }
                 check_result["shortages"].append(shortage)
         
-        print(f"🔍 Проверка материалов:")
+        print("🔍 Проверка материалов:")
         print(f"   Артикулов требуется: {len(needs_by_profile)}")
         print(f"   Артикулов доступно: {len(available_by_profile)}")
         print(f"   Достаточно материалов: {'Да' if check_result['sufficient'] else 'Нет'}")
@@ -1122,6 +1080,11 @@ class SimpleOptimizer:
 
     def _group_identical_plans(self, cut_plans: List[CutPlan]) -> List[CutPlan]:
         """Группирует идентичные планы (одинаковые длина и набор распилов, и тип хлыста)"""
+        
+        # Проверяем настройку парной оптимизации
+        if not self.settings.pair_optimization:
+            print("🔧 Парная оптимизация отключена, группировка планов пропущена.")
+            return cut_plans
 
         def cuts_signature(cuts: List[Dict]) -> tuple:
             """Создает уникальную подпись для набора распилов"""
@@ -1191,21 +1154,21 @@ class SimpleOptimizer:
         )
         
         if total_pieces_before != total_pieces_after:
-            print(f"⚠️ ВНИМАНИЕ: Группировка изменила количество деталей!")
+            print("⚠️ ВНИМАНИЕ: Группировка изменила количество деталей!")
             print(f"   До группировки: {total_pieces_before}")
             print(f"   После группировки: {total_pieces_after}")
             print(f"   Разница: {total_pieces_after - total_pieces_before}")
         else:
-            print(f"✅ Группировка корректна: количество деталей не изменилось")
+            print("✅ Группировка корректна: количество деталей не изменилось")
         
         # Дополнительная валидация деловых остатков
         remainder_validation_errors = self._validate_remainder_usage(result)
         if remainder_validation_errors:
-            print(f"⚠️ КРИТИЧЕСКИЕ ОШИБКИ с деловыми остатками:")
+            print("⚠️ КРИТИЧЕСКИЕ ОШИБКИ с деловыми остатками:")
             for error in remainder_validation_errors:
                 print(f"   - {error}")
         else:
-            print(f"✅ Валидация деловых остатков пройдена")
+            print("✅ Валидация деловых остатков пройдена")
         
         return result
 

@@ -76,7 +76,6 @@ class Piece:
     orderitemsid: Optional[int] = None # ID позиции заказа
     izdpart: Optional[str] = None      # Номер части изделия
     itemsdetailid: Optional[int] = None # ID детали конструкции
-    quantity: int = 1
     
     # Состояние размещения
     placed: bool = False
