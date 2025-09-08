@@ -255,7 +255,8 @@ class SimpleOptimizer:
                     order_id=profile.order_id,
                     piece_id=f"{profile.id}_{profile.length}_{profile.order_id}_{i}",
                     orderitemsid=profile.orderitemsid,
-                    izdpart=profile.izdpart
+                    izdpart=profile.izdpart,
+                    itemsdetailid=profile.itemsdetailid
                 )
                 pieces_to_place.append(piece)
         
@@ -561,10 +562,11 @@ class SimpleOptimizer:
                     'length': piece.length,
                     'quantity': 1,
                     'order_id': piece.order_id,  # Добавляем order_id для точного маппинга
-                    'cell_number': piece.cell_number # Добавляем номер ячейки
+                    'cell_number': piece.cell_number, # Добавляем номер ячейки
+                    'itemsdetailid': piece.itemsdetailid # Добавляем ID детали
                 }
                 stock['cuts'].append(cut_data)
-                print(f"🔧 OPTIMIZER: *** ИСПРАВЛЕННАЯ ВЕРСИЯ *** Добавлен cut с order_id: {piece.order_id}")
+                print(f"🔧 OPTIMIZER: *** ИСПРАВЛЕННАЯ ВЕРСЯ *** Добавлен cut с order_id: {piece.order_id}")
             
             # Обновляем использованную длину и счетчик
             # Используем только needed_length, так как он уже включает ширину пропила

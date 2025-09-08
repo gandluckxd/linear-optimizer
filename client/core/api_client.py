@@ -39,7 +39,10 @@ class APIClient:
                     element_name=data['element_name'],
                     profile_code=data['profile_code'],
                     length=data['length'],
-                    quantity=data['quantity']
+                    quantity=data['quantity'],
+                    orderitemsid=data.get('orderitemsid'),
+                    izdpart=data.get('izdpart'),
+                    itemsdetailid=data.get('itemsdetailid')
                 )
                 profiles.append(profile)
             
@@ -547,7 +550,7 @@ class APIClient:
                             "optimized_mos_id": optimized_mos_id,
                             "orderid": final_orderid,
                             "qty": int(qty_val),
-                            "itemsdetailid": None,
+                            "itemsdetailid": c.get('itemsdetailid'),
                             "itemlong": float(length_val),
                             "ug1": None,
                             "ug2": None,

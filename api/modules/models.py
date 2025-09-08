@@ -34,6 +34,9 @@ class Profile(BaseModel):
     profile_code: str  # Артикул профиля
     length: float  # Требуемая длина в мм
     quantity: int  # Количество штук
+    orderitemsid: int # ID элемента заказа
+    izdpart: Optional[str] = None # Часть изделия
+    itemsdetailid: int # ID детали конструкции
     
 class StockRemainder(BaseModel):
     """Остатки на складе"""

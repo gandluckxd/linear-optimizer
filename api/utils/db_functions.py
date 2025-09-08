@@ -52,7 +52,8 @@ def get_profiles_for_order(order_id: int) -> List[Profile]:
             grd.qty * itd.qty as total_qty,
             itd.thick,
             o.orderid,
-            itd.izdpart
+            itd.izdpart,
+            itd.itemsdetailid
         FROM grorders gr
         JOIN grordersdetail grd on grd.grorderid = gr.grorderid
         JOIN orderitems oi on oi.orderitemsid = grd.orderitemsid
@@ -79,7 +80,8 @@ def get_profiles_for_order(order_id: int) -> List[Profile]:
                 length=float(row[9]),  # thick (длина)
                 quantity=int(row[8]),  # total_qty - Количество
                 orderitemsid=row[3], # oi.orderitemsid
-                izdpart=row[11]      # itd.izdpart
+                izdpart=row[11],      # itd.izdpart
+                itemsdetailid=row[12] # itd.itemsdetailid
             )
             profiles.append(profile)
             print(f"🔍 DB: *** ОТЛАДКА *** Загружен профиль: goodsid={row[7]}, orderid={row[10]}, length={row[9]}, qty={row[8]}")
@@ -2252,17 +2254,32 @@ def insert_optdetail_mos_bulk(details: List[Dict[str, Any]]) -> List[OptDetailMo
 
         # Кешируем orderid по itemsdetailid
         orderid_cache = {}
+        # Новый кеш для обогащения по itemsdetailid
+        itemsdetail_data_cache = {}
         if itemsdetail_ids:
             placeholders = ",".join(["?"] * len(itemsdetail_ids))
-            sql = (
+            # Запрос для orderid_cache
+            sql_orderid = (
                 "SELECT itd.ITEMSDETAILID, oi.ORDERID FROM ITEMSDETAIL itd "
                 "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = itd.ORDERITEMSID "
                 f"WHERE itd.ITEMSDETAILID IN ({placeholders})"
             )
-            cur.execute(sql, list(itemsdetail_ids))
+            cur.execute(sql_orderid, list(itemsdetail_ids))
             for row in cur.fetchall():
                 orderid_cache[row[0]] = row[1]
-        
+            
+            # Запрос для нового кеша itemsdetail_data_cache
+            sql_enrich = (
+                 "SELECT itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, "
+                 "itd.MODELNO, oi.WIDTH AS O_WIDTH, oi.HEIGHT AS O_HEIGHT, itd.WIDTH AS D_WIDTH, itd.HEIGHT AS D_HEIGHT "
+                 "FROM ITEMSDETAIL itd "
+                 "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = itd.ORDERITEMSID "
+                f"WHERE itd.ITEMSDETAILID IN ({placeholders})"
+            )
+            cur.execute(sql_enrich, list(itemsdetail_ids))
+            for row in cur.fetchall():
+                itemsdetail_data_cache[row[0]] = row[1:]
+
         # Шаг 2.5: Предварительно получаем все необходимые ID
         new_ids = []
         for _ in range(len(details)):
@@ -2278,6 +2295,7 @@ def insert_optdetail_mos_bulk(details: List[Dict[str, Any]]) -> List[OptDetailMo
             
             goodsid = optimized_mos_cache.get(detail_data.get("optimized_mos_id"))
 
+            # Логика обогащения, если itemsdetailid НЕ передан
             if enriched_data.get("itemsdetailid") is None and enriched_data.get("orderid") and goodsid:
                 cache_key = (enriched_data["orderid"], goodsid)
                 candidates = itemsdetail_cache.get(cache_key, [])
@@ -2286,13 +2304,39 @@ def insert_optdetail_mos_bulk(details: List[Dict[str, Any]]) -> List[OptDetailMo
                     best_match = min(candidates, key=lambda c: abs((c[0] or 0) - target_length))
                     
                     enriched_data["itemsdetailid"] = best_match[1]
-                    if enriched_data.get("ug1") is None: enriched_data["ug1"] = best_match[2]
-                    if enriched_data.get("ug2") is None: enriched_data["ug2"] = best_match[3]
-                    if not enriched_data.get("izdpart"): enriched_data["izdpart"] = best_match[4]
-                    if not enriched_data.get("partside"): enriched_data["partside"] = best_match[5]
-                    if enriched_data.get("modelno") is None: enriched_data["modelno"] = best_match[6]
-                    if enriched_data.get("modelwidth") is None: enriched_data["modelwidth"] = best_match[7] or best_match[9]
-                    if enriched_data.get("modelheight") is None: enriched_data["modelheight"] = best_match[8] or best_match[10]
+                    if enriched_data.get("ug1") is None:
+                        enriched_data["ug1"] = best_match[2]
+                    if enriched_data.get("ug2") is None:
+                        enriched_data["ug2"] = best_match[3]
+                    if not enriched_data.get("izdpart"):
+                        enriched_data["izdpart"] = best_match[4]
+                    if not enriched_data.get("partside"):
+                        enriched_data["partside"] = best_match[5]
+                    if enriched_data.get("modelno") is None:
+                        enriched_data["modelno"] = best_match[6]
+                    if enriched_data.get("modelwidth") is None:
+                        enriched_data["modelwidth"] = best_match[7] or best_match[9]
+                    if enriched_data.get("modelheight") is None:
+                        enriched_data["modelheight"] = best_match[8] or best_match[10]
+
+            # Новая логика: обогащение, если itemsdetailid ПЕРЕДАН
+            current_itemsdetailid = enriched_data.get("itemsdetailid")
+            if current_itemsdetailid and current_itemsdetailid in itemsdetail_data_cache:
+                cached_details = itemsdetail_data_cache[current_itemsdetailid]
+                if enriched_data.get("ug1") is None:
+                    enriched_data["ug1"] = cached_details[0]
+                if enriched_data.get("ug2") is None:
+                    enriched_data["ug2"] = cached_details[1]
+                if not enriched_data.get("izdpart"):
+                    enriched_data["izdpart"] = cached_details[2]
+                if not enriched_data.get("partside"):
+                    enriched_data["partside"] = cached_details[3]
+                if enriched_data.get("modelno") is None:
+                    enriched_data["modelno"] = cached_details[4]
+                if enriched_data.get("modelwidth") is None:
+                    enriched_data["modelwidth"] = cached_details[5] or cached_details[7]
+                if enriched_data.get("modelheight") is None:
+                    enriched_data["modelheight"] = cached_details[6] or cached_details[8]
 
             if enriched_data.get("itemsdetailid") in orderid_cache:
                 enriched_data["orderid"] = orderid_cache[enriched_data["itemsdetailid"]]

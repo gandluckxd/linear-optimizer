@@ -75,6 +75,7 @@ class Piece:
     piece_id: str  # Уникальный идентификатор детали
     orderitemsid: Optional[int] = None # ID позиции заказа
     izdpart: Optional[str] = None      # Номер части изделия
+    itemsdetailid: Optional[int] = None # ID детали конструкции
     
     # Состояние размещения
     placed: bool = False
@@ -98,6 +99,7 @@ class Profile:
     color: str = ""  # Цвет для визуализации
     orderitemsid: Optional[int] = None # ID позиции заказа
     izdpart: Optional[str] = None      # Номер части изделия
+    itemsdetailid: Optional[int] = None # ID детали конструкции
     
     def __post_init__(self):
         # Копируем количество для отслеживания оставшихся
