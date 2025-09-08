@@ -245,20 +245,59 @@ class SimpleOptimizer:
         
         # Создаем список всех кусков для размещения с использованием новой модели Piece
         pieces_to_place = []
-        for profile in profiles:
-            for i in range(profile.quantity):
-                piece = Piece(
-                    profile_id=profile.id,
-                    profile_code=profile.profile_code,
-                    length=profile.length,
-                    element_name=profile.element_name,
-                    order_id=profile.order_id,
-                    piece_id=f"{profile.id}_{profile.length}_{profile.order_id}_{i}",
-                    orderitemsid=profile.orderitemsid,
-                    izdpart=profile.izdpart,
-                    itemsdetailid=profile.itemsdetailid
-                )
-                pieces_to_place.append(piece)
+
+        if self.settings.pair_optimization:
+            print("🔧 Парная оптимизация включена.")
+            for profile in profiles:
+                num_pairs = profile.quantity // 2
+                num_singles = profile.quantity % 2
+
+                # Создаем парные детали
+                for i in range(num_pairs):
+                    piece = Piece(
+                        profile_id=profile.id,
+                        profile_code=profile.profile_code,
+                        length=profile.length,
+                        element_name=profile.element_name,
+                        order_id=profile.order_id,
+                        piece_id=f"pair_{profile.id}_{profile.length}_{profile.order_id}_{i}",
+                        orderitemsid=profile.orderitemsid,
+                        izdpart=profile.izdpart,
+                        itemsdetailid=profile.itemsdetailid,
+                        quantity=2
+                    )
+                    pieces_to_place.append(piece)
+
+                # Создаем одиночные детали
+                if num_singles > 0:
+                    piece = Piece(
+                        profile_id=profile.id,
+                        profile_code=profile.profile_code,
+                        length=profile.length,
+                        element_name=profile.element_name,
+                        order_id=profile.order_id,
+                        piece_id=f"single_{profile.id}_{profile.length}_{profile.order_id}_{profile.quantity-1}",
+                        orderitemsid=profile.orderitemsid,
+                        izdpart=profile.izdpart,
+                        itemsdetailid=profile.itemsdetailid,
+                        quantity=1
+                    )
+                    pieces_to_place.append(piece)
+        else:
+            for profile in profiles:
+                for i in range(profile.quantity):
+                    piece = Piece(
+                        profile_id=profile.id,
+                        profile_code=profile.profile_code,
+                        length=profile.length,
+                        element_name=profile.element_name,
+                        order_id=profile.order_id,
+                        piece_id=f"{profile.id}_{profile.length}_{profile.order_id}_{i}",
+                        orderitemsid=profile.orderitemsid,
+                        izdpart=profile.izdpart,
+                        itemsdetailid=profile.itemsdetailid
+                    )
+                    pieces_to_place.append(piece)
         
         # Распределяем номера ячеек
         self._distribute_cells_for_profiles(pieces_to_place)
@@ -523,7 +562,9 @@ class SimpleOptimizer:
                 return False
             
             # ЖЕСТКАЯ ПРОВЕРКА: деталь должна поместиться в хлыст
-            needed_length = piece.length
+            needed_length = piece.length * piece.quantity
+            if piece.quantity > 1:
+                needed_length += self.settings.blade_width * (piece.quantity - 1)
             
             # Добавляем ширину пропила если уже есть распилы
             if stock['cuts_count'] > 0:
@@ -553,14 +594,14 @@ class SimpleOptimizer:
             
             if existing_cut:
                 # Увеличиваем количество
-                existing_cut['quantity'] += 1
+                existing_cut['quantity'] += piece.quantity
             else:
                 # Создаем новый распил
                 cut_data = {
                     'profile_id': piece.profile_id,
                     'profile_code': piece.profile_code,  # Добавляем артикул профиля
                     'length': piece.length,
-                    'quantity': 1,
+                    'quantity': piece.quantity,
                     'order_id': piece.order_id,  # Добавляем order_id для точного маппинга
                     'cell_number': piece.cell_number, # Добавляем номер ячейки
                     'itemsdetailid': piece.itemsdetailid # Добавляем ID детали
@@ -571,7 +612,7 @@ class SimpleOptimizer:
             # Обновляем использованную длину и счетчик
             # Используем только needed_length, так как он уже включает ширину пропила
             stock['used_length'] += needed_length
-            stock['cuts_count'] += 1
+            stock['cuts_count'] += piece.quantity
             
             # Помечаем деталь как распределенную
             try:

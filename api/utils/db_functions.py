@@ -1492,18 +1492,8 @@ def adjust_materials_for_moskitka_optimization(
                 price_result = cur.fetchone()
                 price = price_result[0] if price_result else 0
                 
-                # Получаем thick из groupgoods для правильного расчета количества
-                thick_sql = """
-                SELECT gg.thick FROM goods g
-                JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid
-                WHERE g.goodsid = ?
-                """
-                cur.execute(thick_sql, (goodsid,))
-                thick_result = cur.fetchone()
-                thick = thick_result[0] if thick_result else 6000  # По умолчанию 6000 мм
-                
-                # Рассчитываем правильное количество: количество хлыстов * thick
-                correct_quantity = quantity * thick
+                # Исправлено: для деловых остатков QTY - это количество штук.
+                correct_quantity = quantity
                 
                 # Добавляем деловой остаток в приход (SUPPLYREMAINDER)
                 insert_supply_remainder_sql = """
@@ -1516,7 +1506,7 @@ def adjust_materials_for_moskitka_optimization(
                 )
                 """
                 cur.execute(insert_supply_remainder_sql, (supply_id, goodsid, int(length), correct_quantity, price))
-                print(f"🔧 DB: Добавлен деловой остаток профиля в SUPPLYREMAINDER goodsid={goodsid}, длина={length}, количество={quantity}шт")
+                print(f"🔧 DB: Добавлен деловой остаток профиля в SUPPLYREMAINDER goodsid={goodsid}, длина={length}, количество={correct_quantity}шт")
         
         if new_fiberglass_remainders:
             print(f"🔧 DB: Добавление {len(new_fiberglass_remainders)} новых остатков фибергласса в приход...")
