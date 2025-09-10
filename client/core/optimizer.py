@@ -1078,6 +1078,15 @@ class SimpleOptimizer:
 
         return []
 
+    def _get_cuts_signature(self, cuts: List[Dict]) -> tuple:
+        """Создает уникальную подпись для набора распилов"""
+        normalized = []
+        for c in cuts:
+            if isinstance(c, dict):
+                normalized.append((int(c.get('profile_id', 0) or 0), float(c.get('length', 0) or 0), int(c.get('quantity', 0) or 0)))
+        normalized.sort()
+        return tuple(normalized)
+
     def _group_identical_plans(self, cut_plans: List[CutPlan]) -> List[CutPlan]:
         """Группирует идентичные планы (одинаковые длина и набор распилов, и тип хлыста)"""
         
@@ -1085,15 +1094,6 @@ class SimpleOptimizer:
         if not self.settings.pair_optimization:
             print("🔧 Парная оптимизация отключена, группировка планов пропущена.")
             return cut_plans
-
-        def cuts_signature(cuts: List[Dict]) -> tuple:
-            """Создает уникальную подпись для набора распилов"""
-            normalized = []
-            for c in cuts:
-                if isinstance(c, dict):
-                    normalized.append((int(c.get('profile_id', 0) or 0), float(c.get('length', 0) or 0), int(c.get('quantity', 0) or 0)))
-            normalized.sort()
-            return tuple(normalized)
 
         groups: Dict[tuple, CutPlan] = {}
         remainder_plans = []  # Отдельный список для планов деловых остатков
@@ -1107,7 +1107,7 @@ class SimpleOptimizer:
                 continue
             
             # Группируем только цельные материалы
-            cuts_sig = cuts_signature(plan.cuts)
+            cuts_sig = self._get_cuts_signature(plan.cuts)
             key = (
                 float(plan.stock_length),
                 cuts_sig,
@@ -1253,7 +1253,7 @@ class SimpleOptimizer:
         
         # Находим неразмещенные детали
         unplaced_pieces = []
-        print(f"\n🔍 Анализ размещения:")
+        print("\n🔍 Анализ размещения:")
         
         for profile in profiles:
             piece_key = (profile.id, profile.length)
@@ -1337,7 +1337,7 @@ class SimpleOptimizer:
                         continue
                     
                     # Рассчитываем "силу" размещения
-                    score = self._calculate_placement_score(stock, piece)
+                    score = self._calculate_placement_score(stock, piece, available_stocks)
                     if score > best_score:
                         best_score = score
                         best_stock = stock
@@ -1520,7 +1520,7 @@ class SimpleOptimizer:
         
         return max(0, remaining_length)
 
-    def _calculate_placement_score(self, stock: Dict, piece: Piece) -> float:
+    def _calculate_placement_score(self, stock: Dict, piece: Piece, all_stocks: List[Dict]) -> float:
         """Рассчитывает "силу" размещения детали в хлыст"""
         score = 0.0
         
@@ -1578,6 +1578,60 @@ class SimpleOptimizer:
                 score += 200  # Большой бонус для остатков того же артикула
             else:
                 score += 50   # Обычный бонус для цельных материалов
+        
+        # --- NEW PAIRING LOGIC ---
+        # Логика для поощрения создания одинаковых раскроев
+        # Не применяем для деловых остатков, так как они уникальны
+        if not stock.get('is_remainder', False):
+            # 1. Создаем временное представление раскроя, как если бы деталь была добавлена
+            temp_cuts = [c.copy() for c in stock['cuts']]
+            
+            # Эта логика имитирует часть _add_piece_to_stock для создания подписи
+            existing_cut = None
+            for cut in temp_cuts:
+                # Для подписи важны только profile_id и length
+                if (cut.get('profile_id') == piece.profile_id and 
+                    cut.get('length') == piece.length):
+                    existing_cut = cut
+                    break
+            
+            if existing_cut:
+                existing_cut['quantity'] = existing_cut.get('quantity', 0) + 1
+            else:
+                temp_cuts.append({
+                    'profile_id': piece.profile_id, 
+                    'length': piece.length, 
+                    'quantity': 1
+                })
+
+            # 2. Генерируем подпись для потенциального нового раскроя
+            new_signature = self._get_cuts_signature(temp_cuts)
+
+            # 3. Ищем совпадения с другими хлыстами
+            pairing_bonus = 0
+            # Проверяем, есть ли уже хлысты с таким же набором деталей
+            for other_stock in all_stocks:
+                # Пропускаем сам хлыст, пустые хлысты и деловые остатки
+                if (other_stock['id'] == stock['id'] or 
+                    not other_stock['cuts'] or 
+                    other_stock.get('is_remainder', False)):
+                    continue
+                
+                other_signature = self._get_cuts_signature(other_stock['cuts'])
+                if new_signature == other_signature:
+                    pairing_bonus += 3000  # Очень большой бонус за создание идентичного плана
+                    print(f"💎 PAIRING BONUS: Размещение {piece.length}мм в {stock['id']} создаст пару с {other_stock['id']}")
+                    break  # Нашли совпадение, выходим
+            
+            # Дополнительный бонус за начало нового потенциально популярного раскроя
+            if stock['cuts_count'] == 0 and pairing_bonus == 0:
+                # Если хлыст пуст, и мы не нашли полного совпадения
+                # мы можем поощрять создание простых раскроев
+                if len(temp_cuts) == 1:
+                     score += 50 # Небольшой бонус за начало простого раскроя
+            
+            score += pairing_bonus
+        # --- END OF NEW PAIRING LOGIC ---
         
         return score
     
@@ -1885,7 +1939,7 @@ if __name__ == "__main__":
         print(f"💬 Сообщение: {result.message}")
         
         if result.cut_plans:
-            print(f"\n📋 Детали планов:")
+            print("\n📋 Детали планов:")
             for i, plan in enumerate(result.cut_plans):
                 print(f"  Хлыст {i+1}: {len(plan.cuts)} распилов, отход {plan.waste:.0f}мм")
         
