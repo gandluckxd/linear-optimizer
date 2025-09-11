@@ -413,8 +413,8 @@ class FiberglassCanvas(QFrame):
     def _export_to_pdf(self, filename):
         """Экспорт в PDF формат"""
         try:
-            from PyQt5.QtGui import QPdfWriter, QPainter
-            from PyQt5.QtCore import QRectF
+            from PyQt5.QtGui import QPdfWriter, QPainter, QFont
+            from PyQt5.QtCore import QRectF, Qt
 
             # Создаем PDF writer
             pdf_writer = QPdfWriter(filename)
@@ -456,10 +456,13 @@ class FiberglassCanvas(QFrame):
                 item_height = item.height * pdf_scale
 
                 # Выбираем цвет (черно-белая схема, все элементы без заливки)
-                if item.item_type == 'detail':
+                # Нормализуем тип для PDF-экспорта тоже
+                pdf_item_type = item.item_type if item.item_type != 'remnant' else 'remainder'
+
+                if pdf_item_type == 'detail':
                     color = QColor(255, 255, 255, 0)  # Прозрачная заливка для деталей
                     border_color = QColor(100, 100, 100)  # Темно-серый для деталей
-                elif item.item_type == 'remainder':
+                elif pdf_item_type == 'remainder':
                     color = QColor(255, 255, 255, 0)  # Прозрачная заливка для остатков
                     border_color = QColor(80, 80, 80)    # Средне-темно-серый для остатков
                 else:
@@ -469,6 +472,40 @@ class FiberglassCanvas(QFrame):
                 painter.setPen(QPen(border_color, 0.5))
                 painter.setBrush(QBrush(color))
                 painter.drawRect(int(item_x), int(item_y), int(item_width), int(item_height))
+
+                # Подписи внутри прямоугольников
+                text_parts = []
+                if pdf_item_type == 'detail' and item.detail:
+                    if hasattr(item.detail, 'orderno') and item.detail.orderno:
+                        text_parts.append(str(item.detail.orderno))
+                    if hasattr(item, 'cell_number') and item.cell_number is not None:
+                        text_parts.append(f"Ячейка: {item.cell_number}")
+                    line2_parts = []
+                    if hasattr(item.detail, 'item_name') and item.detail.item_name:
+                        line2_parts.append(str(item.detail.item_name))
+                    if hasattr(item.detail, 'izdpart') and item.detail.izdpart:
+                        line2_parts.append(str(item.detail.izdpart))
+                    if line2_parts:
+                        text_parts.append("/".join(line2_parts))
+                    size_text = f"{item.width:.0f}×{item.height:.0f}"
+                    if item.is_rotated:
+                        size_text += " ↻"
+                    text_parts.append(size_text)
+                elif pdf_item_type == 'remainder':
+                    text_parts.append("Деловой остаток")
+                    text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
+                elif pdf_item_type == 'waste':
+                    text_parts.append("ОТХ")
+                    text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
+
+                if text_parts:
+                    painter.save()
+                    painter.setPen(Qt.black)
+                    # Базовый шрифт, адаптация по высоте прямоугольника
+                    target_pt = max(8, min(18, int(item_height * 0.12)))
+                    painter.setFont(QFont("Arial", target_pt))
+                    painter.drawText(QRectF(item_x, item_y, item_width, item_height), Qt.AlignCenter, "\n".join(text_parts))
+                    painter.restore()
 
             painter.end()
 
@@ -573,10 +610,13 @@ class FiberglassCanvas(QFrame):
         height = item.height * scale
 
         # Выбираем цвет в зависимости от типа (черно-белая схема, все элементы без заливки)
-        if item.item_type == 'detail':
+        # Нормализуем типы: оптимизатор возвращает 'remnant', в GUI ожидается 'remainder'
+        item_type = item.item_type if item.item_type != 'remnant' else 'remainder'
+
+        if item_type == 'detail':
             color = QColor(255, 255, 255, 0)  # Прозрачная заливка для деталей
             border_color = QColor(100, 100, 100)  # Темно-серый для деталей
-        elif item.item_type == 'remainder':
+        elif item_type == 'remainder':
             color = QColor(255, 255, 255, 0)  # Прозрачная заливка для остатков
             border_color = QColor(80, 80, 80)    # Средне-темно-серый для остатков
         else:  # waste
@@ -613,7 +653,10 @@ class FiberglassCanvas(QFrame):
         # Определяем текст для отображения
         text_parts = []
 
-        if item.item_type == 'detail' and item.detail:
+        # Нормализуем тип
+        item_type = item.item_type if item.item_type != 'remnant' else 'remainder'
+
+        if item_type == 'detail' and item.detail:
             # 1) Номер заказа
             if hasattr(item.detail, 'orderno') and item.detail.orderno:
                 text_parts.append(str(item.detail.orderno))
@@ -639,12 +682,12 @@ class FiberglassCanvas(QFrame):
             if item.is_rotated:
                 text_parts[-1] += " ↻"
 
-        elif item.item_type == 'remainder':
-            # Всегда показываем размеры остатков
-            text_parts.append("ОСТ")
+        elif item_type == 'remainder':
+            # Всегда показываем, что это деловой остаток, и его размер
+            text_parts.append("Деловой остаток")
             text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
 
-        elif item.item_type == 'waste':
+        elif item_type == 'waste':
             # Всегда показываем размеры отходов
             text_parts.append("ОТХ")
             text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
@@ -657,9 +700,9 @@ class FiberglassCanvas(QFrame):
 
             if font_size >= 6:  # Рисуем текст если шрифт >= 6pt (минимальный читаемый размер)
                 # Выбираем цвет текста в зависимости от типа элемента (все элементы без заливки)
-                if item.item_type == 'detail':
+                if item_type == 'detail':
                     painter.setPen(QPen(QColor(0, 0, 0)))        # Черный текст на прозрачном фоне
-                elif item.item_type == 'remainder':
+                elif item_type == 'remainder':
                     painter.setPen(QPen(QColor(0, 0, 0)))        # Черный текст на прозрачном фоне
                 else:  # waste
                     painter.setPen(QPen(QColor(0, 0, 0)))        # Черный текст на прозрачном фоне
@@ -1403,10 +1446,11 @@ class VisualizationTab(QWidget):
         
         rect = QRectF(item_x_on_page, item_y_on_page, item_width_scaled, item_height_scaled)
 
-        # Настройка кисти и пера
-        if item.item_type == 'detail':
+        # Настройка кисти и пера (нормализуем 'remnant' → 'remainder')
+        normalized_type = item.item_type if item.item_type != 'remnant' else 'remainder'
+        if normalized_type == 'detail':
             border_color = QColor(100, 100, 100)
-        elif item.item_type == 'remainder':
+        elif normalized_type == 'remainder':
             border_color = QColor(80, 80, 80)
         else: # waste
             border_color = QColor(50, 50, 50)
@@ -1417,7 +1461,7 @@ class VisualizationTab(QWidget):
 
         # -- Рисуем текст --
         text_parts = []
-        if item.item_type == 'detail' and item.detail:
+        if normalized_type == 'detail' and item.detail:
             if hasattr(item.detail, 'orderno') and item.detail.orderno:
                 text_parts.append(str(item.detail.orderno))
 
@@ -1436,10 +1480,10 @@ class VisualizationTab(QWidget):
             text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
             if item.is_rotated:
                 text_parts[-1] += " ↻"
-        elif item.item_type == 'remainder':
-            text_parts.append("ОСТ")
+        elif normalized_type == 'remainder':
+            text_parts.append("Деловой остаток")
             text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
-        elif item.item_type == 'waste':
+        elif normalized_type == 'waste':
             text_parts.append("ОТХ")
             text_parts.append(f"{item.width:.0f}×{item.height:.0f}")
 
@@ -1450,7 +1494,7 @@ class VisualizationTab(QWidget):
             painter.drawText(rect, Qt.AlignCenter, "\n".join(text_parts))
 
         # Рисуем размеры для деталей
-        if item.item_type == 'detail':
+        if normalized_type == 'detail':
             painter.save()
             self._draw_pdf_item_dimensions(painter, rect, item.width, item.height)
             painter.restore()
