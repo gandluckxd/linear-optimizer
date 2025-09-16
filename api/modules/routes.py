@@ -191,6 +191,11 @@ async def optimize_profiles(request: dict):
             begin_indent=request.get('begin_indent', 10.0),
             end_indent=request.get('end_indent', 10.0),
             min_trash_mm=request.get('min_trash_mm', 50.0),
+            # Новые параметры парной оптимизации
+            pairing_exact_bonus=float(request.get('pairing_exact_bonus', 3000.0)),
+            pairing_partial_bonus=float(request.get('pairing_partial_bonus', 1000.0)),
+            pairing_partial_threshold=float(request.get('pairing_partial_threshold', 0.7)),
+            pairing_new_simple_bonus=float(request.get('pairing_new_simple_bonus', 150.0)),
         )
         
         # Получаем профили для распила

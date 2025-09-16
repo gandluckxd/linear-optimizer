@@ -33,6 +33,12 @@ class OptimizationSettings:
     remainder_indent: float = 15.0        # Отступы для делового остатка со всех сторон (мм)
     planar_max_waste_percent: float = 5.0 # Максимальная процент отхода для плоскостной оптимизации (%)
 
+    # Параметры усиленной парной оптимизации
+    pairing_exact_bonus: float = 3000.0           # Бонус за точное совпадение раскроя
+    pairing_partial_bonus: float = 1000.0         # Бонус за частичное совпадение (масштабируется по схожести)
+    pairing_partial_threshold: float = 0.7        # Порог схожести для частичного совпадения [0..1]
+    pairing_new_simple_bonus: float = 150.0       # Бонус за старт простого раскроя на пустом хлысте
+
 
 class SimpleOptimizer:
     """
@@ -1087,6 +1093,44 @@ class SimpleOptimizer:
         normalized.sort()
         return tuple(normalized)
 
+    def _calc_signature_similarity(self, sig_a: tuple, sig_b: tuple) -> float:
+        """Оценивает схожесть двух сигнатур раскроя [0..1].
+
+        Идея: считаем, какая доля общего количества деталей совпадает по (profile_id, length).
+        Кол-во для пары берется как min(qty_a, qty_b) и суммируется по всем совпадающим позициям.
+        Делим на максимальную суммарную мощность одной из сигнатур (чтобы избежать деления на 0).
+        """
+        if not sig_a and not sig_b:
+            return 1.0
+        if not sig_a or not sig_b:
+            return 0.0
+
+        # Преобразуем в словари: ключ=(profile_id,length), значение=qty
+        def to_map(sig: tuple) -> Dict[tuple, int]:
+            acc: Dict[tuple, int] = {}
+            for profile_id, length, qty in sig:
+                key = (profile_id, length)
+                acc[key] = acc.get(key, 0) + int(qty)
+            return acc
+
+        a_map = to_map(sig_a)
+        b_map = to_map(sig_b)
+
+        # Общая мощность (сумма qty) по каждой сигнатуре
+        sum_a = sum(a_map.values())
+        sum_b = sum(b_map.values())
+        if max(sum_a, sum_b) == 0:
+            return 0.0
+
+        # Совпавшее количество
+        common = 0
+        for key, qty_a in a_map.items():
+            qty_b = b_map.get(key)
+            if qty_b:
+                common += min(qty_a, qty_b)
+
+        return common / max(sum_a, sum_b)
+
     def _group_identical_plans(self, cut_plans: List[CutPlan]) -> List[CutPlan]:
         """Группирует идентичные планы (одинаковые длина и набор распилов, и тип хлыста)"""
         
@@ -1579,59 +1623,65 @@ class SimpleOptimizer:
             else:
                 score += 50   # Обычный бонус для цельных материалов
         
-        # --- NEW PAIRING LOGIC ---
-        # Логика для поощрения создания одинаковых раскроев
+        # --- ENHANCED PAIRING LOGIC ---
+        # Усиленная логика поощрения создания одинаковых или похожих раскроев
         # Не применяем для деловых остатков, так как они уникальны
-        if not stock.get('is_remainder', False):
+        if not stock.get('is_remainder', False) and self.settings.pair_optimization:
             # 1. Создаем временное представление раскроя, как если бы деталь была добавлена
             temp_cuts = [c.copy() for c in stock['cuts']]
-            
-            # Эта логика имитирует часть _add_piece_to_stock для создания подписи
+
+            # Имитация инкремента количества для подписи
             existing_cut = None
             for cut in temp_cuts:
-                # Для подписи важны только profile_id и length
                 if (cut.get('profile_id') == piece.profile_id and 
                     cut.get('length') == piece.length):
                     existing_cut = cut
                     break
-            
+
             if existing_cut:
                 existing_cut['quantity'] = existing_cut.get('quantity', 0) + 1
             else:
-                temp_cuts.append({
-                    'profile_id': piece.profile_id, 
-                    'length': piece.length, 
-                    'quantity': 1
-                })
+                temp_cuts.append({'profile_id': piece.profile_id, 'length': piece.length, 'quantity': 1})
 
-            # 2. Генерируем подпись для потенциального нового раскроя
+            # 2. Подпись потенциального нового раскроя
             new_signature = self._get_cuts_signature(temp_cuts)
 
-            # 3. Ищем совпадения с другими хлыстами
-            pairing_bonus = 0
-            # Проверяем, есть ли уже хлысты с таким же набором деталей
+            # 3. Ищем точные и частичные совпадения
+            pairing_bonus_total = 0.0
+            best_partial_similarity = 0.0
             for other_stock in all_stocks:
                 # Пропускаем сам хлыст, пустые хлысты и деловые остатки
                 if (other_stock['id'] == stock['id'] or 
                     not other_stock['cuts'] or 
                     other_stock.get('is_remainder', False)):
                     continue
-                
+
                 other_signature = self._get_cuts_signature(other_stock['cuts'])
                 if new_signature == other_signature:
-                    pairing_bonus += 3000  # Очень большой бонус за создание идентичного плана
-                    print(f"💎 PAIRING BONUS: Размещение {piece.length}мм в {stock['id']} создаст пару с {other_stock['id']}")
-                    break  # Нашли совпадение, выходим
-            
-            # Дополнительный бонус за начало нового потенциально популярного раскроя
-            if stock['cuts_count'] == 0 and pairing_bonus == 0:
-                # Если хлыст пуст, и мы не нашли полного совпадения
-                # мы можем поощрять создание простых раскроев
+                    pairing_bonus_total += self.settings.pairing_exact_bonus
+                    print(f"💎 PAIRING EXACT BONUS: {piece.length}мм в {stock['id']} создаст пару с {other_stock['id']}")
+                    # Точное совпадение найдено — можно не искать дальше
+                    best_partial_similarity = 1.0
+                    break
+                else:
+                    # Частичное совпадение
+                    sim = self._calc_signature_similarity(new_signature, other_signature)
+                    if sim > best_partial_similarity:
+                        best_partial_similarity = sim
+
+            # Применяем бонус за частичную схожесть, если превышен порог
+            if pairing_bonus_total == 0 and best_partial_similarity >= self.settings.pairing_partial_threshold:
+                # Масштабируем бонус линейно по величине схожести
+                pairing_bonus_total += self.settings.pairing_partial_bonus * best_partial_similarity
+                print(f"💠 PAIRING PARTIAL BONUS: sim={best_partial_similarity:.2f} для {stock['id']}")
+
+            # 4. Бонус за старт простого потенциального шаблона на пустом хлысте
+            if stock['cuts_count'] == 0 and pairing_bonus_total == 0:
                 if len(temp_cuts) == 1:
-                     score += 50 # Небольшой бонус за начало простого раскроя
-            
-            score += pairing_bonus
-        # --- END OF NEW PAIRING LOGIC ---
+                    score += self.settings.pairing_new_simple_bonus
+
+            score += pairing_bonus_total
+        # --- END OF ENHANCED PAIRING LOGIC ---
         
         return score
     

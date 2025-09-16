@@ -305,6 +305,11 @@ class LinearOptimizerWindow(QMainWindow):
             'min_trash_mm': 50,
             'begin_indent': 10,
             'end_indent': 10,
+            # Параметры парной оптимизации
+            'pairing_exact_bonus': 3000.0,
+            'pairing_partial_bonus': 1000.0,
+            'pairing_partial_threshold': 0.7,
+            'pairing_new_simple_bonus': 150.0,
             # Параметры фибергласса
             'planar_min_remainder_width': 500.0,
             'planar_min_remainder_height': 500.0,
@@ -933,6 +938,11 @@ class LinearOptimizerWindow(QMainWindow):
         self.current_settings.max_waste_percent = self.optimization_params['max_waste_percent']
         self.current_settings.pair_optimization = self.optimization_params['pair_optimization']
         self.current_settings.use_remainders = self.optimization_params['use_remainders']
+        # Новые параметры парной оптимизации
+        self.current_settings.pairing_exact_bonus = self.optimization_params['pairing_exact_bonus']
+        self.current_settings.pairing_partial_bonus = self.optimization_params['pairing_partial_bonus']
+        self.current_settings.pairing_partial_threshold = self.optimization_params['pairing_partial_threshold']
+        self.current_settings.pairing_new_simple_bonus = self.optimization_params['pairing_new_simple_bonus']
         
         # Формируем список хлыстов согласно настройке использования остатков
         stocks_for_optimization = self.stocks
@@ -1153,7 +1163,12 @@ class LinearOptimizerWindow(QMainWindow):
             'min_remainder_length': self.min_remainder_length.value(),
             'max_waste_percent': self.max_waste_percent.value(),
             'pair_optimization': self.pair_optimization.isChecked(),
-            'use_remainders': self.use_remainders.isChecked()
+            'use_remainders': self.use_remainders.isChecked(),
+            # Новые параметры парной оптимизации (если есть элементы UI — пока берем из current_settings)
+            'pairing_exact_bonus': getattr(self.current_settings, 'pairing_exact_bonus', 3000.0),
+            'pairing_partial_bonus': getattr(self.current_settings, 'pairing_partial_bonus', 1000.0),
+            'pairing_partial_threshold': getattr(self.current_settings, 'pairing_partial_threshold', 0.7),
+            'pairing_new_simple_bonus': getattr(self.current_settings, 'pairing_new_simple_bonus', 150.0)
         }
         
         # TODO: Сохранить в файл настроек
@@ -1913,6 +1928,11 @@ class LinearOptimizerWindow(QMainWindow):
             self.current_settings.max_waste_percent = self.optimization_params['max_waste_percent']
             self.current_settings.pair_optimization = self.optimization_params['pair_optimization']
             self.current_settings.use_remainders = self.optimization_params['use_remainders']
+            # Новые параметры парной оптимизации
+            self.current_settings.pairing_exact_bonus = self.optimization_params.get('pairing_exact_bonus', 3000.0)
+            self.current_settings.pairing_partial_bonus = self.optimization_params.get('pairing_partial_bonus', 1000.0)
+            self.current_settings.pairing_partial_threshold = self.optimization_params.get('pairing_partial_threshold', 0.7)
+            self.current_settings.pairing_new_simple_bonus = self.optimization_params.get('pairing_new_simple_bonus', 150.0)
             
             # Показываем сообщение об успешном сохранении
             QMessageBox.information(self, "Параметры сохранены", 
