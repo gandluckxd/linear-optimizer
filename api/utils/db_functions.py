@@ -1451,24 +1451,24 @@ def adjust_materials_for_moskitka_optimization(
                     print(f"🔧 DB: ✅ Списан остаток фибергласса: goodsid={goodsid}, {width}x{height}, кол-во={quantity}")
                 else:
                     # Списываем целый рулон фибергласса (OUTLAYDETAIL)
-                    # Расчет количества в базовых единицах (м2)
-                    measure_sql = "SELECT ggm.measureid, m.amfactor, gg.width, gg.height FROM goods g JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid JOIN grgoodsmeasure ggm ON ggm.grgoodsid = gg.grgoodsid JOIN measure m ON m.measureid = ggm.measureid WHERE g.goodsid = ? AND ggm.ismain = 1"
-                    cur.execute(measure_sql, (goodsid,))
-                    measure_result = cur.fetchone()
-                    
-                    if measure_result:
-                        measureid, amfactor, roll_width, roll_height = measure_result
-                        total_area_m2 = (roll_width * roll_height / 1_000_000) * quantity
-                        correct_quantity = total_area_m2 * amfactor
-                        
-                        insert_outlay_detail_sql = """
-                        INSERT INTO OUTLAYDETAIL (OUTLAYDETAILID, OUTLAYID, GOODSID, QTY, MEASUREID, ISAPPROVED, SELLERPRICE, SELLERCURRENCYID) 
-                        VALUES (gen_id(gen_outlaydetail, 1), ?, ?, ?, ?, 0, 0, 1)
-                        """
-                        cur.execute(insert_outlay_detail_sql, (outlay_id, goodsid, correct_quantity, measureid))
-                        print(f"🔧 DB: ✅ Списан рулон фибергласса: goodsid={goodsid}, кол-во={quantity}шт, площадь={total_area_m2}м2, списано_кол-во={correct_quantity}")
-                    else:
-                        print(f"⚠️ DB: Не найдены единицы измерения для списания рулона фибергласса goodsid={goodsid}")
+                    # Требование: QTY = количество_рулонов * AMFACTOR меры 29
+                    measureid = 29
+                    amfactor = 1
+                    try:
+                        cur.execute("SELECT AMFACTOR FROM MEASURE WHERE MEASUREID = 29")
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            amfactor = int(row[0])
+                    except Exception:
+                        amfactor = 1
+                    correct_quantity = int(quantity) * int(amfactor)
+
+                    insert_outlay_detail_sql = """
+                    INSERT INTO OUTLAYDETAIL (OUTLAYDETAILID, OUTLAYID, GOODSID, QTY, MEASUREID, ISAPPROVED, SELLERPRICE, SELLERCURRENCYID) 
+                    VALUES (gen_id(gen_outlaydetail, 1), ?, ?, ?, ?, 0, 0, 1)
+                    """
+                    cur.execute(insert_outlay_detail_sql, (outlay_id, goodsid, correct_quantity, measureid))
+                    print(f"🔧 DB: ✅ Списан рулон фибергласса: goodsid={goodsid}, кол-во={quantity} рулонов, amfactor={amfactor}, записано QTY={correct_quantity}, measureid={measureid}")
 
         # Заполняем приход деловыми остатками
         if business_remainders:
