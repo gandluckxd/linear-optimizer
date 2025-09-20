@@ -421,26 +421,45 @@ class FiberglassCanvas(QFrame):
             pdf_writer.setPageSize(QPdfWriter.A4)
             pdf_writer.setResolution(300)  # Высокое разрешение
 
-            # Вычисляем размеры для PDF
-            roll_width = self.layout.sheet.width
-            roll_height = self.layout.sheet.height
-
-            # Масштабируем для A4 (предполагаем альбомную ориентацию)
-            page_width = 210  # мм (A4 ширина)
-            page_height = 297  # мм (A4 высота)
-
-            # Вычисляем масштаб для вписывания
-            scale_x = (page_width - 20) / roll_width  # с отступами
-            scale_y = (page_height - 20) / roll_height
-            pdf_scale = min(scale_x, scale_y, 1.0)
-
             painter = QPainter(pdf_writer)
             painter.setRenderHint(QPainter.Antialiasing)
 
-            # Устанавливаем масштаб и смещение для PDF
-            pdf_margin = 10  # мм
-            pdf_offset_x = pdf_margin
-            pdf_offset_y = pdf_margin
+            # Размеры страницы A4 в мм
+            page_width = 210
+            page_height = 297
+            margin = 10 # мм
+
+            # -- Рисуем заголовок --
+            header_font = QFont("Arial", 12)
+            painter.setFont(header_font)
+            painter.setPen(Qt.black)
+            
+            sheet_info = self.layout.sheet
+            header_text = f"Рулон ({sheet_info.marking}, {sheet_info.width:.0f} x {sheet_info.height:.0f} мм)"
+            
+            # Конвертируем размер шрифта из pt в мм (1 pt = 0.352778 mm) и добавляем отступ
+            header_height = painter.fontMetrics().height() * 0.35 + 5 
+            
+            painter.drawText(QRectF(margin, margin, page_width - 2 * margin, header_height), Qt.AlignCenter, header_text)
+
+            # -- Рисуем раскладку --
+            roll_width = self.layout.sheet.width
+            roll_height = self.layout.sheet.height
+
+            drawable_width = page_width - 2 * margin
+            drawable_height = page_height - 2 * margin - header_height
+
+            # Вычисляем масштаб для вписывания
+            if roll_width <= 0 or roll_height <= 0:
+                return
+
+            scale_x = drawable_width / roll_width
+            scale_y = drawable_height / roll_height
+            pdf_scale = min(scale_x, scale_y)
+
+            # Центрируем раскладку
+            pdf_offset_x = (page_width - roll_width * pdf_scale) / 2
+            pdf_offset_y = margin + header_height
 
             # Рисуем границы рулона
             painter.setPen(QPen(self.colors['roll_border'], 1))
@@ -1337,7 +1356,7 @@ class VisualizationTab(QWidget):
                     # -- Рисуем заголовок --
                     painter.setFont(header_font)
                     painter.setPen(Qt.black)
-                    header_text = f"Рулон {i+1} ({sheet_info.width} x {sheet_info.height}) - Стр. {page_num_for_roll}"
+                    header_text = f"Рулон {i+1} ({sheet_info.marking}, {sheet_info.width} x {sheet_info.height}) - Стр. {page_num_for_roll}"
                     painter.drawText(QRectF(margin_pts, margin_pts, drawable_width, header_height), Qt.AlignCenter, header_text)
 
                     # -- Рисуем раскладку --
