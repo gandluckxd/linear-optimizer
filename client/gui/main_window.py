@@ -1666,7 +1666,9 @@ class LinearOptimizerWindow(QMainWindow):
                                         'length': remainder,
                                         'quantity': 0
                                     }
-                                remainders_by_size[remainder_key]['quantity'] += 1
+                                # ИСПРАВЛЕНО: Увеличиваем количество на plan.count
+                                plan_count = getattr(plan, 'count', 1)
+                                remainders_by_size[remainder_key]['quantity'] += plan_count
                     
                     # Формируем итоговый список деловых остатков
                     business_remainders = list(remainders_by_size.values())
