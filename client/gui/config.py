@@ -473,9 +473,9 @@ WIDGET_CONFIGS = {
     """,
     
     "stats_labels": {
-        "default": "color: #333333; font-weight: bold; background-color: transparent; font-size: 11pt;",
-        "remnants": "color: #666666; font-weight: bold; background-color: transparent; font-size: 11pt;",
-        "waste": "color: #999999; font-weight: bold; background-color: transparent; font-size: 11pt;"
+        "default": "color: #ffffff; font-weight: bold; background-color: transparent; font-size: 11pt;",
+        "remnants": "color: #4ecdc4; font-weight: bold; background-color: transparent; font-size: 11pt;",
+        "waste": "color: #ff6b6b; font-weight: bold; background-color: transparent; font-size: 11pt;"
     }
 }
 
