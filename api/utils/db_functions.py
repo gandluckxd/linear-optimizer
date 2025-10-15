@@ -1076,6 +1076,7 @@ def insert_optdetail_mos(
     orderid: int,
     qty: int,
     itemsdetailid: int | None = None,
+    orderitemsid: int | None = None,  # КРИТИЧЕСКИ ВАЖНО: ID изделия
     itemlong: float | None = None,
     ug1: float | None = None,
     ug2: float | None = None,
@@ -1102,7 +1103,7 @@ def insert_optdetail_mos(
     ВАЖНО: orderid должен быть корректным ORDERID из таблицы ORDERS,
     а не GRORDERID. Правильный orderid определяется из результатов оптимизации.
     """
-    print(f"🔍 DB FUNCTION: *** ИСПРАВЛЕННАЯ ВЕРСИЯ *** insert_optdetail_mos вызвана с orderid={orderid}")
+    print(f"🔍 DB FUNCTION: *** ИСПРАВЛЕННАЯ ВЕРСИЯ *** insert_optdetail_mos вызвана с orderid={orderid}, orderitemsid={orderitemsid}")
     try:
         con = get_db_connection()
         cur = con.cursor()
@@ -1127,6 +1128,7 @@ def insert_optdetail_mos(
                 optimized_mos_id,
                 orderid,
                 itemsdetailid,
+                # orderitemsid НЕ записываем - его нет в таблице БД, он получается через ITEMSDETAILID
                 itemlong,
                 qty,
                 ug1,
@@ -1156,6 +1158,7 @@ def insert_optdetail_mos(
             optimized_mos_id=optimized_mos_id,
             orderid=orderid,
             itemsdetailid=itemsdetailid,
+            orderitemsid=orderitemsid,  # КРИТИЧЕСКИ ВАЖНО: ID изделия
             itemlong=itemlong,
             qty=qty,
             ug1=ug1,
@@ -2285,7 +2288,47 @@ def insert_optdetail_mos_bulk(details: List[Dict[str, Any]]) -> List[OptDetailMo
             
             goodsid = optimized_mos_cache.get(detail_data.get("optimized_mos_id"))
 
-            # Логика обогащения, если itemsdetailid НЕ передан
+            # НОВАЯ ЛОГИКА: Если передан orderitemsid (но нет itemsdetailid), ищем по orderitemsid и goodsid
+            if enriched_data.get("itemsdetailid") is None and enriched_data.get("orderitemsid") and goodsid:
+                try:
+                    target_length = float(enriched_data.get("itemlong") or 0)
+                    # Ищем itemsdetailid по orderitemsid и goodsid
+                    cur.execute(
+                        (
+                            "SELECT FIRST 1 itd.ITEMSDETAILID, itd.ANG1, itd.ANG2, itd.IZDPART, itd.PARTSIDE, "
+                            "itd.MODELNO, oi.WIDTH AS O_WIDTH, oi.HEIGHT AS O_HEIGHT, itd.WIDTH AS D_WIDTH, itd.HEIGHT AS D_HEIGHT "
+                            "FROM ITEMSDETAIL itd "
+                            "JOIN ORDERITEMS oi ON oi.ORDERITEMSID = itd.ORDERITEMSID "
+                            "WHERE oi.ORDERITEMSID = ? AND itd.GOODSID = ? "
+                            "ORDER BY ABS(COALESCE(itd.THICK, 0) - ?) ASC, itd.ITEMSDETAILID DESC"
+                        ),
+                        (int(enriched_data["orderitemsid"]), goodsid, target_length),
+                    )
+                    match = cur.fetchone()
+                    if match:
+                        enriched_data["itemsdetailid"] = int(match[0])
+                        if enriched_data.get("ug1") is None:
+                            enriched_data["ug1"] = float(match[1]) if match[1] is not None else None
+                        if enriched_data.get("ug2") is None:
+                            enriched_data["ug2"] = float(match[2]) if match[2] is not None else None
+                        if not enriched_data.get("izdpart"):
+                            enriched_data["izdpart"] = match[3]
+                        if not enriched_data.get("partside"):
+                            enriched_data["partside"] = match[4]
+                        if enriched_data.get("modelno") is None:
+                            enriched_data["modelno"] = int(match[5]) if match[5] is not None else None
+                        if enriched_data.get("modelwidth") is None:
+                            enriched_data["modelwidth"] = int(match[6]) if match[6] is not None else (int(match[8]) if match[8] is not None else None)
+                        if enriched_data.get("modelheight") is None:
+                            enriched_data["modelheight"] = int(match[7]) if match[7] is not None else (int(match[9]) if match[9] is not None else None)
+                        
+                        if ENABLE_LOGGING:
+                            print(f"✅ DB BULK: Найден itemsdetailid={enriched_data['itemsdetailid']} по orderitemsid={enriched_data['orderitemsid']}, goodsid={goodsid}")
+                except Exception as e:
+                    if ENABLE_LOGGING:
+                        print(f"⚠️ DB BULK: Ошибка поиска itemsdetailid по orderitemsid: {e}")
+
+            # Логика обогащения, если itemsdetailid НЕ передан (резервная логика по orderid)
             if enriched_data.get("itemsdetailid") is None and enriched_data.get("orderid") and goodsid:
                 cache_key = (enriched_data["orderid"], goodsid)
                 candidates = itemsdetail_cache.get(cache_key, [])
@@ -2339,6 +2382,7 @@ def insert_optdetail_mos_bulk(details: List[Dict[str, Any]]) -> List[OptDetailMo
                 enriched_data.get("optimized_mos_id"),
                 enriched_data.get("orderid"),
                 enriched_data.get("itemsdetailid"),
+                # orderitemsid НЕ записываем - его нет в таблице БД, он получается через ITEMSDETAILID
                 enriched_data.get("itemlong"),
                 enriched_data.get("qty"),
                 enriched_data.get("ug1"),

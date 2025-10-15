@@ -543,13 +543,14 @@ class APIClient:
                     if final_orderid == 0:
                         print(f"⚠️ API Client: Для детали goodsid={pid} не найден order_id в результатах оптимизации!")
                     
-                    print(f"🔧 API Client: Деталь {subnum_counter}: goodsid={pid}, orderid={final_orderid}, длина={length_val}, кол-во={qty_val}")
+                    print(f"🔧 API Client: Деталь {subnum_counter}: goodsid={pid}, orderid={final_orderid}, orderitemsid={c.get('orderitemsid')}, izdpart={c.get('izdpart')}, длина={length_val}, кол-во={qty_val}")
 
                     detail_payload = {
                         "optimized_mos_id": optimized_mos_id,
                         "orderid": final_orderid,
                         "qty": int(qty_val),
                         "itemsdetailid": c.get('itemsdetailid'),
+                        "orderitemsid": c.get('orderitemsid'),  # КРИТИЧЕСКИ ВАЖНО: ID изделия
                         "itemlong": float(length_val),
                         "ug1": None,
                         "ug2": None,

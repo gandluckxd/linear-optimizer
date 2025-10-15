@@ -237,6 +237,7 @@ class OptDetailMosCreate(BaseModel):
     orderid: int
     qty: int
     itemsdetailid: Optional[int] = None
+    orderitemsid: Optional[int] = None  # КРИТИЧЕСКИ ВАЖНО: ID изделия для уникальной идентификации
     itemlong: Optional[float] = None
     ug1: Optional[float] = None
     ug2: Optional[float] = None
@@ -263,6 +264,7 @@ class OptDetailMos(BaseModel):
     orderid: int
     qty: int
     itemsdetailid: Optional[int] = None
+    orderitemsid: Optional[int] = None  # КРИТИЧЕСКИ ВАЖНО: ID изделия для уникальной идентификации
     itemlong: Optional[float] = None
     ug1: Optional[float] = None
     ug2: Optional[float] = None

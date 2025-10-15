@@ -359,6 +359,7 @@ async def create_optdetail_mos(request: OptDetailMosCreate):
             orderid=final_orderid,  # *** ИСПРАВЛЕНО *** Используем корректный orderid
             qty=request.qty,
             itemsdetailid=enriched.get("itemsdetailid"),
+            orderitemsid=request.orderitemsid,  # КРИТИЧЕСКИ ВАЖНО: ID изделия
             itemlong=request.itemlong,
             ug1=enriched.get("ug1"),
             ug2=enriched.get("ug2"),

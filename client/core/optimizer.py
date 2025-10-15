@@ -558,19 +558,23 @@ class SimpleOptimizer:
                     print(f"❌ Деталь {piece.length}мм не помещается в хлыст {stock['id']} (нужно: {stock['used_length'] + needed_length:.0f}мм, доступно: {effective_length:.0f}мм)")
                     return False
             
-            # Ищем существующий распил такого же типа (включая order_id для точной группировки)
+            # Ищем существующий распил такого же типа (включая orderitemsid для точной группировки по изделиям)
             existing_cut = None
             for cut in stock['cuts']:
                 if (cut['profile_id'] == piece.profile_id and 
                     cut['length'] == piece.length and 
                     cut.get('order_id') == piece.order_id and
-                    cut.get('cell_number') == piece.cell_number): # Проверяем и ячейку
+                    cut.get('cell_number') == piece.cell_number and
+                    cut.get('orderitemsid') == piece.orderitemsid and  # КРИТИЧЕСКИ ВАЖНО: проверяем ID изделия
+                    cut.get('izdpart') == piece.izdpart): # КРИТИЧЕСКИ ВАЖНО: проверяем часть изделия
                     existing_cut = cut
                     break
             
             if existing_cut:
                 # Увеличиваем количество
+                old_qty = existing_cut['quantity']
                 existing_cut['quantity'] += 1
+                print(f"🔧 OPTIMIZER: Увеличено qty существующего cut (orderitemsid={piece.orderitemsid}, length={piece.length}мм): {old_qty} → {existing_cut['quantity']}")
             else:
                 # Создаем новый распил
                 cut_data = {
@@ -580,10 +584,12 @@ class SimpleOptimizer:
                     'quantity': 1,
                     'order_id': piece.order_id,  # Добавляем order_id для точного маппинга
                     'cell_number': piece.cell_number, # Добавляем номер ячейки
-                    'itemsdetailid': piece.itemsdetailid # Добавляем ID детали
+                    'itemsdetailid': piece.itemsdetailid, # Добавляем ID детали
+                    'orderitemsid': piece.orderitemsid,  # КРИТИЧЕСКИ ВАЖНО: ID изделия для уникальной идентификации
+                    'izdpart': piece.izdpart  # КРИТИЧЕСКИ ВАЖНО: Часть изделия для уникальной идентификации
                 }
                 stock['cuts'].append(cut_data)
-                print(f"🔧 OPTIMIZER: *** ИСПРАВЛЕННАЯ ВЕРСЯ *** Добавлен cut с order_id: {piece.order_id}")
+                print(f"🆕 OPTIMIZER: Создан новый cut: length={piece.length}мм, qty=1, orderitemsid={piece.orderitemsid}, izdpart={piece.izdpart}")
             
             # Обновляем использованную длину и счетчик
             # Используем только needed_length, так как он уже включает ширину пропила
@@ -1097,31 +1103,54 @@ class SimpleOptimizer:
         return []
 
     def _get_cuts_signature(self, cuts: List[Dict]) -> tuple:
-        """Создает уникальную подпись для набора распилов"""
+        """Создает уникальную подпись для набора распилов
+        
+        КРИТИЧЕСКИ ВАЖНО: Подпись должна включать orderitemsid и izdpart,
+        чтобы планы для разных изделий НЕ группировались вместе!
+        """
         normalized = []
         for c in cuts:
             if isinstance(c, dict):
-                normalized.append((int(c.get('profile_id', 0) or 0), float(c.get('length', 0) or 0), int(c.get('quantity', 0) or 0)))
+                # Включаем orderitemsid и izdpart в подпись для уникальной идентификации
+                normalized.append((
+                    int(c.get('profile_id', 0) or 0), 
+                    float(c.get('length', 0) or 0), 
+                    int(c.get('quantity', 0) or 0),
+                    int(c.get('orderitemsid', 0) or 0),  # КРИТИЧЕСКИ ВАЖНО: ID изделия
+                    str(c.get('izdpart', '') or '')      # КРИТИЧЕСКИ ВАЖНО: Часть изделия
+                ))
         normalized.sort()
         return tuple(normalized)
 
     def _calc_signature_similarity(self, sig_a: tuple, sig_b: tuple) -> float:
         """Оценивает схожесть двух сигнатур раскроя [0..1].
 
-        Идея: считаем, какая доля общего количества деталей совпадает по (profile_id, length).
+        Идея: считаем, какая доля общего количества деталей совпадает по (profile_id, length, orderitemsid, izdpart).
         Кол-во для пары берется как min(qty_a, qty_b) и суммируется по всем совпадающим позициям.
         Делим на максимальную суммарную мощность одной из сигнатур (чтобы избежать деления на 0).
+        
+        КРИТИЧЕСКИ ВАЖНО: Учитываем orderitemsid и izdpart для точного сравнения!
         """
         if not sig_a and not sig_b:
             return 1.0
         if not sig_a or not sig_b:
             return 0.0
 
-        # Преобразуем в словари: ключ=(profile_id,length), значение=qty
+        # Преобразуем в словари: ключ=(profile_id, length, orderitemsid, izdpart), значение=qty
         def to_map(sig: tuple) -> Dict[tuple, int]:
             acc: Dict[tuple, int] = {}
-            for profile_id, length, qty in sig:
-                key = (profile_id, length)
+            for item in sig:
+                # Обрабатываем кортежи разной длины для обратной совместимости
+                if len(item) >= 5:
+                    # Новый формат: (profile_id, length, qty, orderitemsid, izdpart)
+                    profile_id, length, qty, orderitemsid, izdpart = item[0], item[1], item[2], item[3], item[4]
+                    key = (profile_id, length, orderitemsid, izdpart)
+                elif len(item) >= 3:
+                    # Старый формат: (profile_id, length, qty)
+                    profile_id, length, qty = item[0], item[1], item[2]
+                    key = (profile_id, length, 0, '')  # Для совместимости
+                else:
+                    continue
                 acc[key] = acc.get(key, 0) + int(qty)
             return acc
 
@@ -1172,11 +1201,18 @@ class SimpleOptimizer:
             )
 
             plan_count = getattr(plan, 'count', 1)
+            
+            # Отладочная информация о cuts в плане
+            if plan.cuts:
+                print(f"🔧 План {plan.stock_id} содержит {len(plan.cuts)} типов деталей:")
+                for i, cut in enumerate(plan.cuts):
+                    print(f"   Cut {i+1}: profile_id={cut.get('profile_id')}, length={cut.get('length')}, qty={cut.get('quantity')}, orderitemsid={cut.get('orderitemsid')}, izdpart={cut.get('izdpart')}")
+            
             if key in groups:
                 # Увеличиваем счетчик группы только для цельных материалов
                 old_count = getattr(groups[key], 'count', 1)
                 groups[key].count = old_count + plan_count
-                print(f"🔧 Группирую план цельного хлыста {plan.stock_id} с существующим (теперь count={groups[key].count})")
+                print(f"✅ ГРУППИРОВКА: План {plan.stock_id} объединен с существующим (count: {old_count} → {groups[key].count})")
             else:
                 # Создаем новую группу для цельных материалов
                 new_plan = CutPlan(
@@ -1191,7 +1227,7 @@ class SimpleOptimizer:
                     warehouseremaindersid=None  # Гарантированно None для цельных материалов
                 )
                 groups[key] = new_plan
-                print(f"🔧 Создаю новую группу для плана цельного хлыста {plan.stock_id} (count={plan_count})")
+                print(f"🆕 НОВАЯ ГРУППА: Создана для плана {plan.stock_id} (count={plan_count})")
 
         # Объединяем цельные материалы (сгруппированные) и деловые остатки (несгруппированные)
         result = list(groups.values()) + remainder_plans
