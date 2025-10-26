@@ -1114,6 +1114,30 @@ class LinearOptimizerWindow(QMainWindow):
                 if self.fabric_optimization_result and hasattr(self.fabric_optimization_result, 'message'):
                     error_msg = self.fabric_optimization_result.message
                 self.debug_step_signal.emit(f"❌ {error_msg}")
+                
+                # Проверяем, является ли это критической ошибкой нехватки материалов
+                if "КРИТИЧЕСКАЯ ОШИБКА: НЕХВАТКА ФИБЕРГЛАССА" in error_msg:
+                    # КРИТИЧЕСКАЯ ОШИБКА - показываем красное окно с ошибкой
+                    QMessageBox.critical(
+                        self,
+                        "❌ Критическая ошибка: Нехватка фибергласса",
+                        error_msg
+                    )
+                elif "НЕХВАТКА" in error_msg or "не хватает" in error_msg.lower():
+                    # Обычное предупреждение о нехватке материалов
+                    QMessageBox.warning(
+                        self,
+                        "⚠️ Нехватка материалов",
+                        error_msg
+                    )
+                else:
+                    # Другие ошибки
+                    QMessageBox.warning(
+                        self,
+                        "⚠️ Ошибка оптимизации фибергласса",
+                        error_msg
+                    )
+                
                 # Даже при неудаче передаем результат для отображения информации об ошибке
                 self.update_visualization_signal.emit(self.fabric_optimization_result)
 
@@ -1357,10 +1381,18 @@ class LinearOptimizerWindow(QMainWindow):
             
             # НОВОЕ: Проверяем предупреждения о нехватке материалов или повторном использовании остатков
             if result.message:
-                if "НЕХВАТКА МАТЕРИАЛОВ" in result.message:
+                if "КРИТИЧЕСКАЯ ОШИБКА: НЕХВАТКА МАТЕРИАЛОВ" in result.message:
+                    # КРИТИЧЕСКАЯ ОШИБКА - показываем красное окно с ошибкой
+                    QMessageBox.critical(
+                        self,
+                        "❌ Критическая ошибка: Нехватка материалов",
+                        result.message
+                    )
+                elif "НЕХВАТКА МАТЕРИАЛОВ" in result.message:
+                    # Обычное предупреждение о нехватке материалов
                     QMessageBox.warning(
                         self,
-                        "Нехватка материалов на складе",
+                        "⚠️ Нехватка материалов на складе",
                         result.message
                     )
                 elif "дублирующиеся деловые остатки" in result.message:

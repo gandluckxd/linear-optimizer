@@ -15,7 +15,7 @@ import time
 import copy
 import logging
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Tuple, Callable, Set
+from typing import List, Dict, Optional, Tuple, Callable, Set, Any
 from enum import Enum
 import random
 
@@ -231,6 +231,97 @@ class GuillotineOptimizer:
         if self.progress_callback:
             self.progress_callback(progress)
 
+    def _check_material_availability(self, details: List[Detail], sheets: List[Sheet]) -> Dict[str, Any]:
+        """
+        Проверяет достаточность материалов для выполнения плоскостного раскроя
+        
+        Returns:
+            Dict с результатами проверки
+        """
+        check_result = {
+            "sufficient": True,
+            "shortages": [],
+            "by_material": {}
+        }
+        
+        # Группируем потребности по материалам (артикулам)
+        needs_by_material = {}
+        for detail in details:
+            material = detail.material
+            if material not in needs_by_material:
+                needs_by_material[material] = {
+                    "pieces": 0,
+                    "total_area": 0,
+                    "max_width": 0,
+                    "max_height": 0
+                }
+            
+            needs_by_material[material]["pieces"] += detail.quantity
+            needs_by_material[material]["total_area"] += detail.area * detail.quantity
+            needs_by_material[material]["max_width"] = max(needs_by_material[material]["max_width"], detail.width)
+            needs_by_material[material]["max_height"] = max(needs_by_material[material]["max_height"], detail.height)
+        
+        # Группируем доступные материалы по артикулам
+        available_by_material = {}
+        for sheet in sheets:
+            material = sheet.material
+            if not material:
+                continue
+                
+            if material not in available_by_material:
+                available_by_material[material] = {
+                    "total_area": 0,
+                    "sheets_count": 0,
+                    "sheets": []
+                }
+            
+            # Для всех листов (остатков и цельных) считаем площадь
+            available_by_material[material]["total_area"] += sheet.area
+            available_by_material[material]["sheets_count"] += 1
+            available_by_material[material]["sheets"].append(sheet)
+        
+        # Проверяем каждый материал на достаточность
+        for material, needs in needs_by_material.items():
+            available = available_by_material.get(material, {
+                "total_area": 0,
+                "sheets_count": 0,
+                "sheets": []
+            })
+            
+            check_result["by_material"][material] = {
+                "needed_pieces": needs["pieces"],
+                "needed_area": needs["total_area"],
+                "available_sheets": available["sheets_count"],
+                "available_area": available["total_area"],
+                "sufficient": available["total_area"] >= needs["total_area"]
+            }
+            
+            # Если материала недостаточно
+            if available["total_area"] < needs["total_area"]:
+                check_result["sufficient"] = False
+                shortage = {
+                    "material": material,
+                    "needed_pieces": needs["pieces"],
+                    "needed_area": needs["total_area"],
+                    "available_sheets": available["sheets_count"],
+                    "available_area": available["total_area"],
+                    "shortage_area": needs["total_area"] - available["total_area"],
+                    "shortage_percent": ((needs["total_area"] - available["total_area"]) / needs["total_area"] * 100) if needs["total_area"] > 0 else 0
+                }
+                check_result["shortages"].append(shortage)
+        
+        logger.info("🔍 Проверка материалов фибергласса:")
+        logger.info(f"   Материалов требуется: {len(needs_by_material)}")
+        logger.info(f"   Материалов доступно: {len(available_by_material)}")
+        logger.info(f"   Достаточно материалов: {'Да' if check_result['sufficient'] else 'Нет'}")
+        
+        if not check_result["sufficient"]:
+            logger.warning(f"   Нехватка по {len(check_result['shortages'])} материалам:")
+            for shortage in check_result["shortages"]:
+                logger.warning(f"     {shortage['material']}: нехватка {shortage['shortage_area']:.0f}мм² ({shortage['shortage_percent']:.1f}%)")
+        
+        return check_result
+
     def optimize(self, details: List[Detail], sheets: List[Sheet], cell_map: Dict[str, int] = None) -> OptimizationResult:
         """
         Главный метод оптимизации
@@ -273,6 +364,40 @@ class GuillotineOptimizer:
                     useful_remnants=[],
                     optimization_time=time.time() - start_time,
                     message="Нет доступных листов"
+                )
+
+            # Проверяем достаточность материалов фибергласса
+            self._report_progress(5)
+            material_check = self._check_material_availability(details, sheets)
+            if not material_check["sufficient"]:
+                # КРИТИЧЕСКАЯ ОШИБКА: Нехватка материалов - останавливаем оптимизацию
+                error_msg = "❌ КРИТИЧЕСКАЯ ОШИБКА: НЕХВАТКА ФИБЕРГЛАССА НА СКЛАДЕ\n\n"
+                error_msg += "Невозможно выполнить плоскостную оптимизацию из-за недостатка материалов:\n\n"
+                
+                for shortage in material_check["shortages"]:
+                    error_msg += f"📋 Материал: {shortage['material']}\n"
+                    error_msg += f"   Требуется: {shortage['needed_pieces']} деталей общей площадью {shortage['needed_area']:.0f}мм²\n"
+                    error_msg += f"   Доступно: {shortage['available_sheets']} листов общей площадью {shortage['available_area']:.0f}мм²\n"
+                    error_msg += f"   Нехватка: {shortage['shortage_area']:.0f}мм² ({shortage['shortage_percent']:.1f}%)\n\n"
+                
+                error_msg += "🔧 Необходимые действия:\n"
+                error_msg += "1. Докупите недостающий фибергласс на склад\n"
+                error_msg += "2. Измените размеры деталей для использования доступных материалов\n"
+                error_msg += "3. Проверьте остатки фибергласса на складе и зарезервированные материалы\n"
+                
+                logger.error(f"❌ {error_msg}")
+                
+                # ОСТАНАВЛИВАЕМ оптимизацию и возвращаем ошибку
+                return OptimizationResult(
+                    success=False,
+                    layouts=[],
+                    unplaced_details=details,
+                    total_efficiency=0.0,
+                    total_waste_percent=100.0,
+                    total_cost=0.0,
+                    useful_remnants=[],
+                    optimization_time=time.time() - start_time,
+                    message=error_msg
                 )
 
             # Подготовка данных
