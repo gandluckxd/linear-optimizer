@@ -1357,7 +1357,19 @@ def adjust_materials_for_moskitka_optimization(
         cur.execute(supply_id_sql)
         supply_id = cur.fetchone()[0]
         print(f"🔧 DB: Создан новый приход supplyid={supply_id}")
-        
+
+        # 2.5. НОВОЕ: Переносим материалы москиток из списаний СЗ конструкций
+        print(f"🔧 DB: Перенос материалов москиток из СЗ конструкций...")
+        transfer_result = transfer_moskitka_materials_from_grorders(grorders_mos_id)
+
+        transferred_materials = []
+        if transfer_result.get('success'):
+            transferred_materials = transfer_result.get('transferred_materials', [])
+            deleted_count = transfer_result.get('deleted_count', 0)
+            print(f"✅ DB: Перенесено {len(transferred_materials)} типов материалов ({deleted_count} записей из СЗ конструкций)")
+        else:
+            print(f"⚠️ DB: Ошибка переноса материалов: {transfer_result.get('error', 'Неизвестная ошибка')}")
+
         # 3. Заполняем созданные документы материалами
         print(f"🔧 DB: Заполнение документов материалами...")
         
@@ -1473,6 +1485,30 @@ def adjust_materials_for_moskitka_optimization(
                     cur.execute(insert_outlay_detail_sql, (outlay_id, goodsid, correct_quantity, measureid))
                     print(f"🔧 DB: ✅ Списан рулон фибергласса: goodsid={goodsid}, кол-во={quantity} рулонов, amfactor={amfactor}, записано QTY={correct_quantity}, measureid={measureid}")
 
+        # НОВОЕ: Добавляем перенесенные материалы москиток в списание
+        if transferred_materials:
+            print(f"🔧 DB: Добавление {len(transferred_materials)} перенесенных материалов москиток в списание...")
+
+            for material in transferred_materials:
+                goodsid = material.get('goodsid')
+                measureid = material.get('measureid')
+                qty = material.get('qty', 0)
+
+                if not goodsid or qty <= 0:
+                    continue
+
+                insert_transferred_sql = """
+                INSERT INTO OUTLAYDETAIL (
+                    OUTLAYDETAILID, OUTLAYID, GOODSID, QTY, MEASUREID,
+                    ISAPPROVED, SELLERPRICE, SELLERCURRENCYID
+                ) VALUES (
+                    gen_id(gen_outlaydetail, 1), ?, ?, ?, ?,
+                    0, 0, 1
+                )
+                """
+                cur.execute(insert_transferred_sql, (outlay_id, goodsid, qty, measureid))
+                print(f"🔧 DB: ✅ Добавлен перенесенный материал москитки: goodsid={goodsid}, qty={qty}, measureid={measureid}")
+
         # Заполняем приход деловыми остатками
         if business_remainders:
             print(f"🔧 DB: Добавление {len(business_remainders)} деловых остатков профилей в приход...")
@@ -1547,12 +1583,14 @@ def adjust_materials_for_moskitka_optimization(
         
         total_time = time.time() - operation_start_time
         print(f"✅ DB: Корректировка материалов завершена успешно за {total_time:.2f} секунд")
-        
+
         return {
             "success": True,
             "message": "Материалы успешно скорректированы",
             "outlay_id": outlay_id,
             "supply_id": supply_id,
+            "transferred_materials_count": len(transferred_materials),
+            "transferred_records_deleted": transfer_result.get('deleted_count', 0) if transfer_result.get('success') else 0,
             "performance": {
                 "total_time": round(total_time, 2)
             }
@@ -1585,6 +1623,180 @@ def adjust_materials_for_moskitka_optimization(
             "error": str(e),
             "performance": {
                 "total_time": round(total_time, 2)
+            }
+        }
+
+def transfer_moskitka_materials_from_grorders(grorders_mos_id: int) -> dict:
+    """
+    Переносит материалы москитных сеток из списаний СЗ конструкций в новое списание.
+
+    Логика:
+    1. Получает все GRORDERID связанные с grorders_mos_id
+    2. Находит все списания (OUTLAY) для этих GRORDER
+    3. Выбирает материалы типов MosNetShnur, MosNetShip, MosNet из OUTLAYDETAIL
+    4. Удаляет эти материалы из OUTLAYDETAIL
+    5. Возвращает сгруппированный список материалов для добавления в новое списание
+
+    Args:
+        grorders_mos_id: ID сменного задания москитных сеток
+
+    Returns:
+        dict: {
+            'success': bool,
+            'transferred_materials': list[dict],  # Список материалов для добавления в списание
+            'deleted_count': int,  # Количество удаленных записей
+            'message': str
+        }
+    """
+    operation_start_time = time.time()
+
+    try:
+        print(f"🔧 DB: Начало переноса материалов москиток для grorders_mos_id={grorders_mos_id}")
+
+        con = get_db_connection()
+        cur = con.cursor()
+
+        # Шаг 1: Получаем все GRORDERID связанные с grorders_mos_id
+        grorder_ids = get_grorder_ids_by_grorders_mos_id(grorders_mos_id)
+
+        if not grorder_ids:
+            print(f"⚠️ DB: Не найдено GRORDERID для grorders_mos_id={grorders_mos_id}")
+            con.close()
+            return {
+                'success': True,
+                'transferred_materials': [],
+                'deleted_count': 0,
+                'message': 'Нет связанных СЗ конструкций'
+            }
+
+        print(f"🔧 DB: Найдено {len(grorder_ids)} СЗ конструкций: {grorder_ids}")
+
+        # Шаг 2: Получаем ID типов групп материалов москиток
+        type_codes = ['MosNetShnur', 'MosNetShip', 'MosNet']
+        type_ids_sql = f"""
+        SELECT GGTYPEID FROM GROUPGOODSTYPES
+        WHERE CODE IN ({','.join(['?' for _ in type_codes])})
+        """
+        cur.execute(type_ids_sql, type_codes)
+        type_ids = [row[0] for row in cur.fetchall()]
+
+        if not type_ids:
+            print(f"⚠️ DB: Не найдены типы групп материалов с кодами {type_codes}")
+            con.close()
+            return {
+                'success': True,
+                'transferred_materials': [],
+                'deleted_count': 0,
+                'message': 'Типы материалов москиток не найдены в БД'
+            }
+
+        print(f"🔧 DB: Найдены типы материалов: GGTYPEID IN {type_ids}")
+
+        # Шаг 3: Выбираем материалы москиток из OUTLAYDETAIL
+        # Группируем по goodsid + measureid и суммируем QTY
+        grorder_placeholders = ','.join(['?' for _ in grorder_ids])
+        type_placeholders = ','.join(['?' for _ in type_ids])
+
+        select_materials_sql = f"""
+        SELECT
+            od.GOODSID,
+            od.MEASUREID,
+            SUM(od.QTY) as TOTAL_QTY,
+            COUNT(*) as RECORD_COUNT
+        FROM OUTLAYDETAIL od
+        JOIN OUTLAY o ON o.OUTLAYID = od.OUTLAYID
+        JOIN GOODS g ON g.GOODSID = od.GOODSID
+        JOIN GROUPGOODS gg ON gg.GRGOODSID = g.GRGOODSID
+        WHERE o.GRORDERID IN ({grorder_placeholders})
+            AND gg.GGTYPEID IN ({type_placeholders})
+            AND o.DELETED = 0
+        GROUP BY od.GOODSID, od.MEASUREID
+        """
+
+        params = grorder_ids + type_ids
+        cur.execute(select_materials_sql, params)
+        materials_data = cur.fetchall()
+
+        if not materials_data:
+            print(f"⚠️ DB: Не найдено материалов москиток в списаниях СЗ конструкций")
+            con.close()
+            return {
+                'success': True,
+                'transferred_materials': [],
+                'deleted_count': 0,
+                'message': 'Материалы москиток не найдены в списаниях СЗ'
+            }
+
+        # Формируем список материалов для переноса
+        transferred_materials = []
+        for row in materials_data:
+            goodsid, measureid, total_qty, record_count = row
+            transferred_materials.append({
+                'goodsid': goodsid,
+                'measureid': measureid,
+                'qty': total_qty
+            })
+            print(f"🔧 DB: Материал для переноса: goodsid={goodsid}, measureid={measureid}, qty={total_qty}, записей={record_count}")
+
+        # Шаг 4: Удаляем эти материалы из OUTLAYDETAIL
+        delete_sql = f"""
+        DELETE FROM OUTLAYDETAIL
+        WHERE OUTLAYDETAILID IN (
+            SELECT od.OUTLAYDETAILID
+            FROM OUTLAYDETAIL od
+            JOIN OUTLAY o ON o.OUTLAYID = od.OUTLAYID
+            JOIN GOODS g ON g.GOODSID = od.GOODSID
+            JOIN GROUPGOODS gg ON gg.GRGOODSID = g.GRGOODSID
+            WHERE o.GRORDERID IN ({grorder_placeholders})
+                AND gg.GGTYPEID IN ({type_placeholders})
+                AND o.DELETED = 0
+        )
+        """
+
+        cur.execute(delete_sql, params)
+        deleted_count = cur.rowcount if hasattr(cur, 'rowcount') else 0
+
+        print(f"🔧 DB: Удалено {deleted_count} записей из OUTLAYDETAIL")
+
+        # Фиксируем изменения
+        con.commit()
+        con.close()
+
+        total_time = time.time() - operation_start_time
+        print(f"✅ DB: Перенос материалов завершен успешно за {total_time:.2f} секунд")
+
+        return {
+            'success': True,
+            'transferred_materials': transferred_materials,
+            'deleted_count': deleted_count,
+            'message': f'Перенесено {len(transferred_materials)} типов материалов ({deleted_count} записей)',
+            'performance': {
+                'total_time': round(total_time, 2)
+            }
+        }
+
+    except Exception as e:
+        total_time = time.time() - operation_start_time
+        print(f"❌ DB: Ошибка переноса материалов за {total_time:.2f}с: {e}")
+        import traceback
+        print(f"❌ DB: Трассировка ошибки: {traceback.format_exc()}")
+
+        # Пытаемся откатить изменения в случае ошибки
+        try:
+            if 'con' in locals() and con:
+                con.rollback()
+                print(f"🔄 DB: Выполнен откат транзакции")
+                con.close()
+        except Exception as rollback_error:
+            print(f"❌ DB: Ошибка при откате транзакции: {rollback_error}")
+
+        return {
+            'success': False,
+            'transferred_materials': [],
+            'deleted_count': 0,
+            'error': str(e),
+            'performance': {
+                'total_time': round(total_time, 2)
             }
         }
 
