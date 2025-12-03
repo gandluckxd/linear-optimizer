@@ -1769,7 +1769,7 @@ class LinearOptimizerWindow(QMainWindow):
                         outlay_id = result.get('outlay_id')
                         supply_id = result.get('supply_id')
                         transferred_count = result.get('transferred_materials_count', 0)
-                        transferred_deleted = result.get('transferred_records_deleted', 0)
+                        transferred_records = result.get('transferred_records_count', 0)
 
                         self.status_bar.showMessage(f"Материалы скорректированы")
 
@@ -1782,7 +1782,7 @@ class LinearOptimizerWindow(QMainWindow):
                             f"Добавлено деловых остатков (профили) в приход: {len(business_remainders)}\n"
                             f"Добавлено материалов (фибергласс) в списание: {len(used_fiberglass_sheets)}\n"
                             f"Добавлено деловых остатков (фибергласс) в приход: {len(new_fiberglass_remainders)}\n\n"
-                            f"🔄 Перенесено материалов москиток из СЗ конструкций: {transferred_count} типов ({transferred_deleted} записей удалено)"
+                            f"🔄 Перенесено материалов москиток из СЗ конструкций: {transferred_count} типов ({transferred_records} записей из сводной таблицы)"
                         )
                         QMessageBox.information(self, "Корректировка материалов", info_msg)
                     else:

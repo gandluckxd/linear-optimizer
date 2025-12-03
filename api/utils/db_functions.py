@@ -1363,12 +1363,13 @@ def adjust_materials_for_moskitka_optimization(
         transfer_result = transfer_moskitka_materials_from_grorders(grorders_mos_id)
 
         transferred_materials = []
+        records_count = 0
         if transfer_result.get('success'):
             transferred_materials = transfer_result.get('transferred_materials', [])
-            deleted_count = transfer_result.get('deleted_count', 0)
-            print(f"✅ DB: Перенесено {len(transferred_materials)} типов материалов ({deleted_count} записей из СЗ конструкций)")
+            records_count = transfer_result.get('records_count', 0)
+            print(f"✅ DB: Получено {len(transferred_materials)} типов материалов ({records_count} записей из сводной таблицы)")
         else:
-            print(f"⚠️ DB: Ошибка переноса материалов: {transfer_result.get('error', 'Неизвестная ошибка')}")
+            print(f"⚠️ DB: Ошибка получения материалов: {transfer_result.get('error', 'Неизвестная ошибка')}")
 
         # 3. Заполняем созданные документы материалами
         print(f"🔧 DB: Заполнение документов материалами...")
@@ -1509,6 +1510,19 @@ def adjust_materials_for_moskitka_optimization(
                 cur.execute(insert_transferred_sql, (outlay_id, goodsid, qty, measureid))
                 print(f"🔧 DB: ✅ Добавлен перенесенный материал москитки: goodsid={goodsid}, qty={qty}, measureid={measureid}")
 
+            # После успешного добавления всех материалов - очищаем сводную таблицу
+            print(f"🔧 DB: Очистка сводной таблицы OUTLAYDETAIL_MOS_MATERIALS...")
+            grorder_ids = get_grorder_ids_by_grorders_mos_id(grorders_mos_id)
+            if grorder_ids:
+                grorder_placeholders = ','.join(['?' for _ in grorder_ids])
+                delete_from_summary_sql = f"""
+                DELETE FROM OUTLAYDETAIL_MOS_MATERIALS
+                WHERE GRORDERID IN ({grorder_placeholders})
+                """
+                cur.execute(delete_from_summary_sql, grorder_ids)
+                deleted_from_summary = cur.rowcount if hasattr(cur, 'rowcount') else 0
+                print(f"✅ DB: Удалено {deleted_from_summary} записей из сводной таблицы")
+
         # Заполняем приход деловыми остатками
         if business_remainders:
             print(f"🔧 DB: Добавление {len(business_remainders)} деловых остатков профилей в приход...")
@@ -1590,7 +1604,7 @@ def adjust_materials_for_moskitka_optimization(
             "outlay_id": outlay_id,
             "supply_id": supply_id,
             "transferred_materials_count": len(transferred_materials),
-            "transferred_records_deleted": transfer_result.get('deleted_count', 0) if transfer_result.get('success') else 0,
+            "transferred_records_count": records_count,
             "performance": {
                 "total_time": round(total_time, 2)
             }
@@ -1628,14 +1642,16 @@ def adjust_materials_for_moskitka_optimization(
 
 def transfer_moskitka_materials_from_grorders(grorders_mos_id: int) -> dict:
     """
-    Переносит материалы москитных сеток из списаний СЗ конструкций в новое списание.
+    Получает материалы москитных сеток из сводной таблицы OUTLAYDETAIL_MOS_MATERIALS.
 
-    Логика:
-    1. Получает все GRORDERID связанные с grorders_mos_id
-    2. Находит все списания (OUTLAY) для этих GRORDER
-    3. Выбирает материалы типов MosNetShnur, MosNetShip, MosNet из OUTLAYDETAIL
-    4. Удаляет эти материалы из OUTLAYDETAIL
-    5. Возвращает сгруппированный список материалов для добавления в новое списание
+    Новая логика (через триггеры):
+    1. Материалы москиток автоматически сохраняются в OUTLAYDETAIL_MOS_MATERIALS
+       триггером SAVE_MOS_MATERIALS_BD перед удалением триггером DELETE_MOS_STUFFS
+    2. Получает все GRORDERID связанные с grorders_mos_id
+    3. Выбирает материалы из сводной таблицы OUTLAYDETAIL_MOS_MATERIALS
+    4. Группирует материалы по goodsid + measureid и суммирует количество
+    5. Возвращает список материалов для добавления в новое списание
+    6. После успешного переноса удаляет записи из сводной таблицы
 
     Args:
         grorders_mos_id: ID сменного задания москитных сеток
@@ -1644,7 +1660,7 @@ def transfer_moskitka_materials_from_grorders(grorders_mos_id: int) -> dict:
         dict: {
             'success': bool,
             'transferred_materials': list[dict],  # Список материалов для добавления в списание
-            'deleted_count': int,  # Количество удаленных записей
+            'records_count': int,  # Количество записей в сводной таблице
             'message': str
         }
     """
@@ -1665,70 +1681,43 @@ def transfer_moskitka_materials_from_grorders(grorders_mos_id: int) -> dict:
             return {
                 'success': True,
                 'transferred_materials': [],
-                'deleted_count': 0,
+                'records_count': 0,
                 'message': 'Нет связанных СЗ конструкций'
             }
 
         print(f"🔧 DB: Найдено {len(grorder_ids)} СЗ конструкций: {grorder_ids}")
 
-        # Шаг 2: Получаем ID типов групп материалов москиток
-        type_codes = ['MosNetShnur', 'MosNetShip', 'MosNet']
-        type_ids_sql = f"""
-        SELECT GGTYPEID FROM GROUPGOODSTYPES
-        WHERE CODE IN ({','.join(['?' for _ in type_codes])})
-        """
-        cur.execute(type_ids_sql, type_codes)
-        type_ids = [row[0] for row in cur.fetchall()]
-
-        if not type_ids:
-            print(f"⚠️ DB: Не найдены типы групп материалов с кодами {type_codes}")
-            con.close()
-            return {
-                'success': True,
-                'transferred_materials': [],
-                'deleted_count': 0,
-                'message': 'Типы материалов москиток не найдены в БД'
-            }
-
-        print(f"🔧 DB: Найдены типы материалов: GGTYPEID IN {type_ids}")
-
-        # Шаг 3: Выбираем материалы москиток из OUTLAYDETAIL
+        # Шаг 2: Выбираем материалы москиток из сводной таблицы OUTLAYDETAIL_MOS_MATERIALS
         # Группируем по goodsid + measureid и суммируем QTY
         grorder_placeholders = ','.join(['?' for _ in grorder_ids])
-        type_placeholders = ','.join(['?' for _ in type_ids])
 
         select_materials_sql = f"""
         SELECT
-            od.GOODSID,
-            od.MEASUREID,
-            SUM(od.QTY) as TOTAL_QTY,
+            omm.GOODSID,
+            omm.MEASUREID,
+            SUM(omm.QTY) as TOTAL_QTY,
             COUNT(*) as RECORD_COUNT
-        FROM OUTLAYDETAIL od
-        JOIN OUTLAY o ON o.OUTLAYID = od.OUTLAYID
-        JOIN GOODS g ON g.GOODSID = od.GOODSID
-        JOIN GROUPGOODS gg ON gg.GRGOODSID = g.GRGOODSID
-        WHERE o.GRORDERID IN ({grorder_placeholders})
-            AND gg.GGTYPEID IN ({type_placeholders})
-            AND o.DELETED = 0
-        GROUP BY od.GOODSID, od.MEASUREID
+        FROM OUTLAYDETAIL_MOS_MATERIALS omm
+        WHERE omm.GRORDERID IN ({grorder_placeholders})
+        GROUP BY omm.GOODSID, omm.MEASUREID
         """
 
-        params = grorder_ids + type_ids
-        cur.execute(select_materials_sql, params)
+        cur.execute(select_materials_sql, grorder_ids)
         materials_data = cur.fetchall()
 
         if not materials_data:
-            print(f"⚠️ DB: Не найдено материалов москиток в списаниях СЗ конструкций")
+            print(f"⚠️ DB: Не найдено материалов москиток в сводной таблице для СЗ конструкций")
             con.close()
             return {
                 'success': True,
                 'transferred_materials': [],
-                'deleted_count': 0,
-                'message': 'Материалы москиток не найдены в списаниях СЗ'
+                'records_count': 0,
+                'message': 'Материалы москиток не найдены в сводной таблице'
             }
 
         # Формируем список материалов для переноса
         transferred_materials = []
+        total_records = 0
         for row in materials_data:
             goodsid, measureid, total_qty, record_count = row
             transferred_materials.append({
@@ -1736,40 +1725,27 @@ def transfer_moskitka_materials_from_grorders(grorders_mos_id: int) -> dict:
                 'measureid': measureid,
                 'qty': total_qty
             })
-            print(f"🔧 DB: Материал для переноса: goodsid={goodsid}, measureid={measureid}, qty={total_qty}, записей={record_count}")
+            total_records += record_count
+            print(f"🔧 DB: Материал для переноса: goodsid={goodsid}, measureid={measureid}, qty={total_qty}, записей в сводной таблице={record_count}")
 
-        # Шаг 4: Удаляем эти материалы из OUTLAYDETAIL
-        delete_sql = f"""
-        DELETE FROM OUTLAYDETAIL
-        WHERE OUTLAYDETAILID IN (
-            SELECT od.OUTLAYDETAILID
-            FROM OUTLAYDETAIL od
-            JOIN OUTLAY o ON o.OUTLAYID = od.OUTLAYID
-            JOIN GOODS g ON g.GOODSID = od.GOODSID
-            JOIN GROUPGOODS gg ON gg.GRGOODSID = g.GRGOODSID
-            WHERE o.GRORDERID IN ({grorder_placeholders})
-                AND gg.GGTYPEID IN ({type_placeholders})
-                AND o.DELETED = 0
-        )
-        """
+        print(f"🔧 DB: Всего записей в сводной таблице: {total_records}")
 
-        cur.execute(delete_sql, params)
-        deleted_count = cur.rowcount if hasattr(cur, 'rowcount') else 0
+        # НЕ удаляем записи из сводной таблицы здесь!
+        # Они будут удалены ПОСЛЕ успешного добавления в новое списание
+        # в функции adjust_materials_for_moskitka_optimization
 
-        print(f"🔧 DB: Удалено {deleted_count} записей из OUTLAYDETAIL")
-
-        # Фиксируем изменения
+        # Фиксируем изменения (на самом деле мы ничего не меняли, только читали)
         con.commit()
         con.close()
 
         total_time = time.time() - operation_start_time
-        print(f"✅ DB: Перенос материалов завершен успешно за {total_time:.2f} секунд")
+        print(f"✅ DB: Получение материалов из сводной таблицы завершено успешно за {total_time:.2f} секунд")
 
         return {
             'success': True,
             'transferred_materials': transferred_materials,
-            'deleted_count': deleted_count,
-            'message': f'Перенесено {len(transferred_materials)} типов материалов ({deleted_count} записей)',
+            'records_count': total_records,
+            'message': f'Получено {len(transferred_materials)} типов материалов ({total_records} записей из сводной таблицы)',
             'performance': {
                 'total_time': round(total_time, 2)
             }
