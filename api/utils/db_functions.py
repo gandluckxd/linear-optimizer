@@ -153,7 +153,7 @@ def get_stock_for_profile(profile_id: int) -> List[Stock]:
             wh.WAREHOUSEID as stock_id,
             wh.GOODSID,
             6000 as length,
-            wh.QTY - wh.RESERVEQTY as qty,
+            wh.QTY as qty,
             whl.RNAME as location,
             0 as is_remainder,
             NULL as warehouseremaindersid,
@@ -162,7 +162,7 @@ def get_stock_for_profile(profile_id: int) -> List[Stock]:
         JOIN WH_LIST whl ON whl.WHLISTID = wh.WHLISTID
         JOIN GOODS g ON g.GOODSID = wh.GOODSID
         WHERE wh.GOODSID = ? 
-        AND (wh.QTY - wh.RESERVEQTY) > 0
+        AND wh.QTY > 0
         AND whl.DELETED = 0
         AND g.DELETED = 0
         """
@@ -176,7 +176,7 @@ def get_stock_for_profile(profile_id: int) -> List[Stock]:
             whr.WHREMAINDERID as stock_id,
             whr.GOODSID,
             whr.THICK as length,
-            whr.QTY - whr.RESERVEQTY as qty,
+            whr.QTY as qty,
             whl.RNAME as location,
             1 as is_remainder,
             whr.WHREMAINDERID as warehouseremaindersid,
@@ -185,7 +185,7 @@ def get_stock_for_profile(profile_id: int) -> List[Stock]:
         JOIN WH_LIST whl ON whl.WHLISTID = whr.WHLISTID
         JOIN GOODS g ON g.GOODSID = whr.GOODSID
         WHERE whr.GOODSID = ?
-        AND (whr.QTY - whr.RESERVEQTY) > 0
+        AND whr.QTY > 0
         AND whl.DELETED = 0
         AND g.DELETED = 0
         """
@@ -243,12 +243,12 @@ def get_stock_remainders(profile_codes: List[str]) -> List[StockRemainder]:
             select
                 g.marking as profile_code,
                 whm.thick as length,
-                whm.qty - whm.reserveqty as quantity_pieces
+                whm.qty as quantity_pieces
             from warehouseremainder whm
             join goods g on g.goodsid = whm.goodsid
             join groupgoods gg on gg.grgoodsid = g.grgoodsid
             where g.MARKING IN ({placeholders})
-            and (whm.qty - whm.reserveqty) > 0
+            and whm.qty > 0
             ORDER BY g.MARKING, whm.THICK DESC
         """
         
@@ -301,10 +301,10 @@ def get_stock_materials(profile_codes: List[str]) -> List[StockMaterial]:
         SELECT 
             g.MARKING as profile_code,
             gg.THICK as length,
-            SUM(wh.QTY - wh.RESERVEQTY) as warehouse_qty,
+            SUM(wh.QTY) as warehouse_qty,
             gg.THICK as typical_size,
             CASE 
-                WHEN gg.THICK > 0 THEN SUM(wh.QTY - wh.RESERVEQTY) / gg.THICK
+                WHEN gg.THICK > 0 THEN SUM(wh.QTY) / gg.THICK
                 ELSE 0
             END as quantity_pieces
         FROM WAREHOUSE wh
@@ -312,7 +312,7 @@ def get_stock_materials(profile_codes: List[str]) -> List[StockMaterial]:
         JOIN GOODS g ON g.GOODSID = wh.GOODSID
         JOIN GROUPGOODS gg ON gg.GRGOODSID = g.GRGOODSID
         WHERE g.MARKING IN ({placeholders})
-        AND (wh.QTY - wh.RESERVEQTY) > 0
+        AND wh.QTY > 0
         AND whl.DELETED = 0
         AND g.DELETED = 0
         AND gg.THICK > 1
@@ -419,7 +419,7 @@ def diagnose_stock_materials_issue(profile_codes: List[str]) -> Dict[str, Any]:
         # 2. Проверяем склад для найденных товаров
         goodsids = [str(row[0]) for row in goods_rows]
         warehouse_sql = f"""
-        SELECT wh.GOODSID, wh.QTY, wh.RESERVEQTY, (wh.QTY - wh.RESERVEQTY) as available_qty,
+        SELECT wh.GOODSID, wh.QTY, wh.QTY as available_qty,
                whl.DELETED as WHL_DELETED, g.MARKING
         FROM WAREHOUSE wh
         JOIN WH_LIST whl ON whl.WHLISTID = wh.WHLISTID  
@@ -437,10 +437,9 @@ def diagnose_stock_materials_issue(profile_codes: List[str]) -> Dict[str, Any]:
             diagnosis["warehouse_data"].append({
                 "goodsid": row[0],
                 "qty": row[1],
-                "reserve_qty": row[2], 
-                "available_qty": row[3],
-                "whl_deleted": row[4],
-                "marking": row[5]
+                "available_qty": row[2],
+                "whl_deleted": row[3],
+                "marking": row[4]
             })
         
         # 3. Анализ условий фильтрации
@@ -449,8 +448,8 @@ def diagnose_stock_materials_issue(profile_codes: List[str]) -> Dict[str, Any]:
         thick_filtered_count = 0
         
         for wh_row in warehouse_rows:
-            available_qty = wh_row[3]
-            whl_deleted = wh_row[4]
+            available_qty = wh_row[2]
+            whl_deleted = wh_row[3]
             goodsid = wh_row[0]
             
             # Находим thick для этого товара
@@ -1833,7 +1832,7 @@ def get_warehouse_remainders_by_goodsid(goodsid: int) -> List[Dict[str, Any]]:
             g.marking AS g_marking,
             whm.goodsid,
             whm.thick,
-            whm.qty - whm.reserveqty AS qty
+            whm.qty AS qty
         FROM warehouseremainder whm
         JOIN goods g ON g.goodsid = whm.goodsid
         JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid
@@ -2153,7 +2152,7 @@ def get_fiberglass_warehouse_materials(goodsids: List[int]) -> List[FiberglassSh
             g.goodsid,
             gg.width,
             gg.height,
-            wh.qty - wh.reserveqty as available_qty,
+            wh.qty as available_qty,
             m.amfactor
         FROM goods g
         JOIN groupgoods gg ON gg.grgoodsid = g.grgoodsid
@@ -2166,7 +2165,7 @@ def get_fiberglass_warehouse_materials(goodsids: List[int]) -> List[FiberglassSh
         AND gg.ggtypeid = 58
         AND gg.width > 0
         AND gg.height > 0
-        AND (wh.qty - wh.reserveqty) > 0
+        AND wh.qty > 0
         ORDER BY g.marking
         """
 
@@ -2260,7 +2259,7 @@ def get_fiberglass_warehouse_remainders(goodsids: List[int]) -> List[FiberglassS
             whm.goodsid,
             whm.width,
             whm.height,
-            whm.qty - whm.reserveqty as qty,
+            whm.qty as qty,
             whm.whremainderid,
             (whm.width * whm.height) as area_mm2
         FROM warehouseremainder whm
@@ -2269,7 +2268,7 @@ def get_fiberglass_warehouse_remainders(goodsids: List[int]) -> List[FiberglassS
         JOIN groupgoodstypes ggt ON ggt.ggtypeid = gg.ggtypeid
         WHERE whm.goodsid IN ({placeholders})
         AND gg.ggtypeid = 58
-        AND (whm.qty - whm.reserveqty) > 0
+        AND whm.qty > 0
         ORDER BY area_mm2 DESC
         """
 
@@ -2687,4 +2686,3 @@ def delete_optimized_mos_by_grorders_mos_id(grorders_mos_id: int) -> bool:
         if ENABLE_LOGGING:
             print(f"Ошибка удаления из OPTIMIZED_MOS по GRORDER_MOS_ID={grorders_mos_id}: {e}")
         raise
-
