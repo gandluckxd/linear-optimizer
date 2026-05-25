@@ -952,19 +952,31 @@ def optimize(details: List[dict], materials: List[dict], remainders: List[dict],
         # Обрабатываем цельные листы
         for material_data in materials:
             try:
-                sheet = Sheet(
-                    id=str(material_data.get('id', f'material_{len(sheets)}')),
-                    width=float(material_data.get('width', 0)),
-                    height=float(material_data.get('height', 0)),
-                    material=str(material_data.get('g_marking', '')),
-                    cost_per_unit=float(material_data.get('cost', 0)),
-                    is_remainder=False,
-                    goodsid=int(material_data.get('goodsid', 0)) if material_data.get('goodsid') else None,
-                    marking=str(material_data.get('g_marking', '')) # Сохраняем артикул
-                )
-                if sheet.width > 0 and sheet.height > 0 and sheet.material:
-                    sheets.append(sheet)
-                    logger.info(f"🔧 Создан лист: {sheet.material}, goodsid={sheet.goodsid}")
+                qty = int(material_data.get('quantity', 1))
+                logger.info(f"📦 Обработка цельного материала: артикул={material_data.get('g_marking', '')}, "
+                           f"размер={material_data.get('width', 0)}x{material_data.get('height', 0)}, "
+                           f"количество={qty}")
+
+                goodsid = material_data.get('goodsid')
+                if goodsid:
+                    goodsid = int(goodsid)
+
+                base_id = material_data.get('id', len(sheets))
+                # Создаем листы по количеству цельных рулонов
+                for j in range(qty):
+                    sheet = Sheet(
+                        id=f"material_{base_id}_{j+1}",
+                        width=float(material_data.get('width', 0)),
+                        height=float(material_data.get('height', 0)),
+                        material=str(material_data.get('g_marking', '')),
+                        cost_per_unit=float(material_data.get('cost', 0)),
+                        is_remainder=False,
+                        goodsid=goodsid,
+                        marking=str(material_data.get('g_marking', '')) # Сохраняем артикул
+                    )
+                    if sheet.width > 0 and sheet.height > 0 and sheet.material:
+                        sheets.append(sheet)
+                        logger.info(f"🔧 Создан лист {j+1}/{qty}: {sheet.material}, goodsid={sheet.goodsid}")
             except Exception as e:
                 logger.error(f"Ошибка обработки листа: {e}")
 
