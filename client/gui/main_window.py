@@ -28,7 +28,13 @@ from typing import Dict
 # Импорты для модульной архитектуры
 from core.api_client import get_api_client
 from core.optimizer import LinearOptimizer, CuttingStockOptimizer, OptimizationSettings, SolverType
-from core.fiberglass_optimizer import optimize as optimize_fiberglass
+from core.headless_workflow import (
+    build_stocks,
+    generate_cell_map,
+    load_optimization_input,
+    optimize_fiberglass_collections,
+    optimize_linear,
+)
 
 from core.models import Profile, Stock, OptimizationResult, StockRemainder, StockMaterial, FiberglassDetail, FiberglassSheet
 from .table_widgets import (
@@ -67,115 +73,18 @@ class DataLoadThread(QThread):
     def run(self):
         """Основная логика загрузки данных"""
         try:
-            self.debug_step.emit(f"🔄 Загрузка данных для {len(self.order_ids)} сменных заданий...")
-            
-            # Загружаем профили для всех заказов
-            all_profiles = []
-            for i, order_id in enumerate(self.order_ids):
-                self.debug_step.emit(f"📋 Загрузка профилей для заказа {order_id} ({i+1}/{len(self.order_ids)})...")
-                profiles = self.api_client.get_profiles(order_id)
-                all_profiles.extend(profiles)
-                self.debug_step.emit(f"✅ Загружено {len(profiles)} профилей для заказа {order_id}")
-            
-            self.debug_step.emit(f"📊 Всего загружено {len(all_profiles)} профилей")
-            
-            # Получаем уникальные артикулы профилей
-            profile_codes = list(set(profile.profile_code for profile in all_profiles))
-            self.debug_step.emit(f"🔧 Найдено {len(profile_codes)} уникальных артикулов: {profile_codes}")
-            
-            # Загружаем остатки со склада
-            self.debug_step.emit("📦 Загрузка остатков со склада...")
-            stock_remainders = self.api_client.get_stock_remainders(profile_codes)
-            self.debug_step.emit(f"✅ Загружено {len(stock_remainders)} остатков")
-            
-            # Загружаем материалы со склада
-            self.debug_step.emit("📦 Загрузка материалов со склада...")
-            stock_materials = self.api_client.get_stock_materials(profile_codes)
-            self.debug_step.emit(f"✅ Загружено {len(stock_materials)} материалов")
-
-            # Детальная информация о загруженных материалах
-            if stock_materials:
-                self.debug_step.emit("📋 Детали загруженных материалов:")
-                for material in stock_materials:
-                    self.debug_step.emit(f"  - {material.profile_code}: {material.quantity_pieces} хлыстов по {material.length}мм")
-            else:
-                self.debug_step.emit("⚠️ ВНИМАНИЕ: Не загружен ни один материал!")
-
-            # Загружаем данные полотен (фибргласс)
-            self.debug_step.emit("🪟 Загрузка данных полотен москитных сеток...")
-
-            # Используем grorders_mos_id, переданный в конструктор потока
-            grorders_mos_id = self.grorders_mos_id
-            if grorders_mos_id:
-                self.debug_step.emit(f"🔧 Используем grorders_mos_id={grorders_mos_id} для загрузки данных полотен")
-            else:
-                self.debug_step.emit("⚠️ grorders_mos_id не задан, пропускаем загрузку данных полотен")
-
-            fabric_details = []
-            fabric_remainders = []
-            fabric_materials = []
-
-            if grorders_mos_id:
-                try:
-                    # Загружаем детали полотен
-                    self.debug_step.emit(f"📋 Загрузка деталей полотен для grorders_mos_id={grorders_mos_id}...")
-                    fabric_details = self.api_client.get_fiberglass_details(grorders_mos_id)
-                    print(f"🔧 DEBUG: API вернул {len(fabric_details)} деталей полотен")
-                    print(f"🔧 DEBUG: fabric_details тип: {type(fabric_details)}")
-                    if fabric_details and len(fabric_details) > 0:
-                        print(f"🔧 DEBUG: Первая деталь: {fabric_details[0]}")
-                        print(f"🔧 DEBUG: Первая деталь атрибуты: {dir(fabric_details[0])}")
-                    self.debug_step.emit(f"✅ Загружено {len(fabric_details)} деталей полотен")
-
-                    if fabric_details:
-                        self.debug_step.emit("📋 Детали загруженных полотен:")
-                        for detail in fabric_details:
-                            self.debug_step.emit(f"  - {detail.item_name}: {detail.width}мм x {detail.height}мм, кол-во: {detail.quantity}")
-
-                        # Получаем уникальные goodsids из деталей для загрузки материалов со склада
-                        temp_goodsids = list(set(detail.goodsid for detail in fabric_details if detail.goodsid))
-                        fabric_codes = list(set(detail.marking for detail in fabric_details if detail.marking))
-                        self.debug_step.emit(f"🔧 Найдено {len(temp_goodsids)} уникальных goodsids: {temp_goodsids}")
-                        self.debug_step.emit(f"🔧 Найдено {len(fabric_codes)} уникальных артикулов полотен: {fabric_codes}")
-
-                        # Загружаем остатки полотен со склада
-                        self.debug_step.emit("📦 Загрузка остатков полотен со склада...")
-                        try:
-                            fabric_remainders = self.api_client.get_fiberglass_remainders(temp_goodsids)
-                            self.debug_step.emit(f"✅ Загружено {len(fabric_remainders)} остатков полотен")
-                        except Exception as e:
-                            self.debug_step.emit(f"⚠️ Ошибка загрузки остатков полотен: {e}")
-                            fabric_remainders = []
-
-                        # Загружаем материалы полотен со склада
-                        self.debug_step.emit("📦 Загрузка материалов полотен со склада...")
-                        try:
-                            fabric_materials = self.api_client.get_fiberglass_materials(temp_goodsids)
-                            self.debug_step.emit(f"✅ Загружено {len(fabric_materials)} материалов полотен")
-                        except Exception as e:
-                            self.debug_step.emit(f"⚠️ Ошибка загрузки материалов полотен: {e}")
-                            fabric_materials = []
-
-                        if fabric_materials:
-                            self.debug_step.emit("📋 Детали загруженных материалов полотен:")
-                            for material in fabric_materials:
-                                self.debug_step.emit(f"  - {getattr(material, 'marking', 'неизвестно')}: {getattr(material, 'quantity', 1)} полотен {getattr(material, 'width', 0)}мм x {getattr(material, 'height', 0)}мм")
-                        else:
-                            self.debug_step.emit("⚠️ ВНИМАНИЕ: Не загружен ни один материал полотен!")
-                    else:
-                        self.debug_step.emit("⚠️ ВНИМАНИЕ: Не найдено деталей полотен для раскроя!")
-
-                except Exception as e:
-                    self.debug_step.emit(f"❌ Ошибка загрузки данных полотен: {e}")
-            else:
-                self.debug_step.emit("⚠️ ВНИМАНИЕ: Не удалось определить grorders_mos_id для загрузки полотен")
-
-            # Отправляем данные в главный поток
+            if not self.grorders_mos_id:
+                raise ValueError("Не задан grorders_mos_id")
+            loaded = load_optimization_input(
+                self.api_client,
+                self.grorders_mos_id,
+                progress=self.debug_step.emit,
+            )
             self.data_loaded.emit(
-                all_profiles,
-                {'remainders': stock_remainders, 'materials': stock_materials},
-                fabric_details,
-                {'remainders': fabric_remainders, 'materials': fabric_materials}
+                loaded.profiles,
+                {'remainders': loaded.stock_remainders, 'materials': loaded.stock_materials},
+                loaded.fabric_details,
+                {'remainders': loaded.fabric_remainders, 'materials': loaded.fabric_materials}
             )
             self.debug_step.emit("🎉 Загрузка данных завершена успешно!")
             self.success_occurred.emit()
@@ -223,14 +132,14 @@ class OptimizationThread(QThread):
                 self.optimization_error.emit("Нет хлыстов для оптимизации")
                 return
             
-            self.debug_step.emit("🔧 DEBUG: Вызываем optimizer.optimize()")
+            self.debug_step.emit("🔧 DEBUG: Вызываем общий workflow оптимизации")
             
             # Запуск оптимизации
-            result = self.optimizer.optimize(
-                profiles=self.profiles,
-                stocks=self.stocks,
-                settings=self.settings,
-                progress_fn=progress_callback
+            result = optimize_linear(
+                self.profiles,
+                self.stocks,
+                self.settings,
+                progress_callback,
             )
             
             self.debug_step.emit(f"🔧 DEBUG: Оптимизация завершена, результат: {result}")
@@ -1070,14 +979,15 @@ class LinearOptimizerWindow(QMainWindow):
             if not cell_map:
                 self.debug_step_signal.emit("⚠️ Не удалось сгенерировать карту ячеек для фибергласса.")
 
-            # Синхронный вызов оптимизации фибергласса
-            self.fabric_optimization_result = optimize_fiberglass(
-                details=details_dict,
-                materials=materials_dict,
-                remainders=remainders_dict,
-                params=fabric_params,
-                progress_fn=progress_callback,
-                cell_map=cell_map  # Передаем карту ячеек
+            # Синхронный вызов общего адаптера данных и неизменённого
+            # алгоритма фибергласса.
+            self.fabric_optimization_result = optimize_fiberglass_collections(
+                self.fabric_details,
+                self.fabric_remainders,
+                self.fabric_materials,
+                fabric_params,
+                cell_map,
+                progress_callback,
             )
 
             print(f"🔧 DEBUG: optimize_fiberglass вернул: {self.fabric_optimization_result}")
@@ -1254,52 +1164,9 @@ class LinearOptimizerWindow(QMainWindow):
                     if order_id and order_id.isdigit():
                         order_ids.append(int(order_id))
             
-            # Создаем объединенный список stocks для оптимизации
-            self.stocks = []
-            stock_id = 1
-            
-            # Добавляем остатки
-            for remainder in self.stock_remainders:
-                # Для деловых остатков создаем ОТДЕЛЬНЫЙ объект Stock для каждой палки
-                # Это критически важно для правильного подсчета количества!
-                for i in range(remainder.quantity_pieces):
-                    stock = Stock(
-                        id=stock_id,  # Уникальный ID для каждой палки
-                        profile_id=1,  # Базовый ID
-                        length=remainder.length,
-                        quantity=1,  # КРИТИЧЕСКИ ВАЖНО: каждая палка = 1 штука
-                        location="Остатки",
-                        is_remainder=True
-                    )
-                    # Добавляем атрибут profile_code для проверки артикулов в оптимизаторе
-                    stock.profile_code = remainder.profile_code
-                    # Добавляем warehouseremaindersid для отслеживания
-                    stock.warehouseremaindersid = getattr(remainder, 'warehouseremaindersid', None)
-                    # Добавляем groupgoods_thick для расчета количества в миллиметрах
-                    stock.groupgoods_thick = getattr(remainder, 'groupgoods_thick', 6000)
-                    # Добавляем уникальный идентификатор экземпляра
-                    stock.instance_id = i + 1
-                    self.stocks.append(stock)
-                    stock_id += 1
-            
-            # Добавляем материалы
-            for material in self.stock_materials:
-                stock = Stock(
-                    id=stock_id,
-                    profile_id=1,  # Базовый ID
-                    length=material.length,
-                    quantity=material.quantity_pieces,  # Количество палок этого материала
-                    location="Материалы",
-                    is_remainder=False
-                )
-                # Добавляем атрибут profile_code для проверки артикулов в оптимизаторе
-                stock.profile_code = material.profile_code
-                # Материалы не имеют warehouseremaindersid
-                stock.warehouseremaindersid = None
-                # Добавляем groupgoods_thick для расчета количества в миллиметрах
-                stock.groupgoods_thick = getattr(material, 'groupgoods_thick', 6000)
-                self.stocks.append(stock)
-                stock_id += 1
+            # Общая подготовка stock-объектов: каждый складской остаток
+            # остаётся отдельной физической палкой, как и раньше.
+            self.stocks = build_stocks(self.stock_remainders, self.stock_materials)
             
             print(f"🔧 DEBUG: Создано {len(self.stocks)} хлыстов для оптимизации")
             
@@ -1843,42 +1710,8 @@ class LinearOptimizerWindow(QMainWindow):
             self.status_bar.showMessage("Критическая ошибка распределения ячеек")
 
     def _generate_cell_map(self) -> Dict[str, int]:
-        """
-        Генерирует карту распределения ячеек на основе загруженных данных.
-        
-        Собирает все уникальные пары (orderitemsid, izdpart) из профилей и деталей фибергласса,
-        сортирует их и присваивает последовательный номер ячейки.
-        
-        Returns:
-            Dict[str, int]: Карта, где ключ - f"{orderitemsid}_{izdpart}", а значение - номер ячейки.
-        """
-        unique_items = set()
-
-        # Собираем уникальные элементы из профилей
-        if self.profiles:
-            for profile in self.profiles:
-                if hasattr(profile, 'orderitemsid') and profile.orderitemsid is not None:
-                    # izdpart может отсутствовать или быть None, используем пустую строку для консистентности
-                    izdpart = getattr(profile, 'izdpart', '') or ''
-                    unique_items.add((profile.orderitemsid, izdpart))
-
-        # Собираем уникальные элементы из деталей фибергласса
-        if self.fabric_details:
-            for detail in self.fabric_details:
-                if hasattr(detail, 'orderitemsid') and detail.orderitemsid is not None:
-                    izdpart = getattr(detail, 'izdpart', '') or ''
-                    unique_items.add((detail.orderitemsid, izdpart))
-
-        if not unique_items:
-            print("⚠️ Не найдено элементов для создания карты ячеек.")
-            return {}
-
-        # Сортируем для последовательной нумерации
-        # Сортируем сначала по orderitemsid, затем по izdpart
-        sorted_items = sorted(list(unique_items), key=lambda x: (x[0], x[1]))
-
-        # Создаем карту: {ключ: номер_ячейки}
-        cell_map = {f"{orderitemsid}_{izdpart}": i + 1 for i, (orderitemsid, izdpart) in enumerate(sorted_items)}
+        """Вернуть общую для GUI и runner детерминированную карту ячеек."""
+        cell_map = generate_cell_map(self.profiles or [], self.fabric_details or [])
 
         if cell_map:
             print(f"✅ Карта ячеек успешно сгенерирована, {len(cell_map)} уникальных записей.")

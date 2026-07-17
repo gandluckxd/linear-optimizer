@@ -1,6 +1,7 @@
 # Linear Optimizer Client Dependencies
-# Консольный запуск без PyQt
+# Для оставленного диагностического PyQt-клиента
 
+PyQt5==5.15.10
 requests==2.31.0
 pyinstaller==6.14.2
 

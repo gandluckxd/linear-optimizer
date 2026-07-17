@@ -53,8 +53,9 @@ ipython_config.py
 
 # Project specific
 user_settings.json
+client/mos_optimizer.json
 optimization_results/
 temp/
 uploads/
 downloads/
-cache/ 
+cache/
