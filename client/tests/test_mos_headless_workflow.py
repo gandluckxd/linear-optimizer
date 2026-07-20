@@ -6,6 +6,7 @@ perform a write to Firebird.
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import io
 import json
@@ -86,17 +87,23 @@ class BrokenApiClient(FakeApiClient):
 
 
 class MosHeadlessWorkflowTests(unittest.TestCase):
-    def write_config(self, folder: Path, extra: dict | None = None) -> Path:
-        config = {
-            "_comment": "Allowed explanatory field",
-            "api_url": "http://fake-api:8001",
-            "optimization": {"_comment": "Also allowed"},
-            "operations": {"_comment": "And here too"},
-        }
-        if extra:
-            config.update(extra)
-        path = folder / "mos_optimizer.json"
-        path.write_text(json.dumps(config), encoding="utf-8")
+    def write_config(
+        self,
+        folder: Path,
+        extra: str = "",
+        *,
+        encoding: str = "utf-8",
+        bom: bool = False,
+    ) -> Path:
+        path = folder / "linear_optimizer_mos.txt"
+        content = """# Комментарий для человека — runner его игнорирует.
+api_url = http://fake-api:8001
+{extra}
+""".format(extra=extra)
+        if bom:
+            path.write_bytes(codecs.BOM_UTF8 + content.encode("utf-8"))
+        else:
+            path.write_text(content, encoding=encoding)
         return path
 
     def test_full_workflow_persists_and_reports_document_numbers(self):
@@ -125,26 +132,94 @@ class MosHeadlessWorkflowTests(unittest.TestCase):
         self.assertNotIn("adjust_materials_altawin", api.calls)
         self.assertNotIn("distribute_cell_numbers", api.calls)
 
-    def test_config_ignores_underscore_explanations(self):
+    def test_example_txt_is_readable(self):
+        api_url, settings, log_file = runner.load_config(
+            CLIENT_DIR / "linear_optimizer_mos.example.txt"
+        )
+
+        self.assertEqual(api_url, "http://127.0.0.1:8001")
+        self.assertEqual(settings.blade_width, 5.0)
+        self.assertTrue(settings.pair_optimization)
+        self.assertTrue(settings.adjust_materials)
+        self.assertEqual(log_file, CLIENT_DIR / "logs/mos-optimizer-runner.log")
+
+    def test_txt_config_accepts_russian_boolean_values(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = self.write_config(
                 Path(temporary),
-                {
-                    "optimization": {
-                        "_linear": "Only explanation",
-                        "blade_width_mm": 6.5,
-                    },
-                    "operations": {
-                        "_operation": "Only explanation",
-                        "adjust_materials": False,
-                    },
-                },
+                """pair_optimization = да
+use_remainders = нет
+allow_rotation = 1
+adjust_materials = 0
+distribute_cells = false
+save_result = true""",
             )
             api_url, settings, _log_file = runner.load_config(path)
 
         self.assertEqual(api_url, "http://fake-api:8001")
-        self.assertEqual(settings.blade_width, 6.5)
+        self.assertTrue(settings.pair_optimization)
+        self.assertFalse(settings.use_remainders)
+        self.assertTrue(settings.allow_rotation)
         self.assertFalse(settings.adjust_materials)
+        self.assertFalse(settings.distribute_cells)
+        self.assertTrue(settings.save_result)
+
+    def test_txt_config_accepts_decimal_comma_and_inline_comments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_config(
+                Path(temporary),
+                """; Полная строка комментария
+
+blade_width_mm = 4,5 # Комментарий после значения
+pairing_partial_threshold = 0,75; Ещё один комментарий""",
+            )
+            _api_url, settings, _log_file = runner.load_config(path)
+
+        self.assertEqual(settings.blade_width, 4.5)
+        self.assertEqual(settings.pairing_partial_threshold, 0.75)
+
+    def test_txt_config_accepts_utf8_bom(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_config(Path(temporary), "use_remainders = да", bom=True)
+            _api_url, settings, _log_file = runner.load_config(path)
+
+        self.assertTrue(settings.use_remainders)
+
+    def test_txt_config_accepts_windows_1251(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_config(
+                Path(temporary),
+                "# Настройка сохранена Блокнотом Windows\nuse_remainders = нет",
+                encoding="cp1251",
+            )
+            _api_url, settings, _log_file = runner.load_config(path)
+
+        self.assertFalse(settings.use_remainders)
+
+    def test_txt_config_rejects_unknown_and_duplicate_parameter_with_line_number(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_config(
+                Path(temporary),
+                """unknown_parameter = 1
+blade_width_mm = 5
+blade_width = 6""",
+            )
+            with self.assertRaisesRegex(runner.WorkflowError, r"Строка 3: неизвестный параметр"):
+                runner.load_config(path)
+
+            path = self.write_config(
+                Path(temporary),
+                """blade_width_mm = 5
+blade_width = 6""",
+            )
+            with self.assertRaisesRegex(runner.WorkflowError, r"Строка 4: параметр blade_width уже задан"):
+                runner.load_config(path)
+
+    def test_txt_config_rejects_invalid_line_with_line_number(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_config(Path(temporary), "это не настройка")
+            with self.assertRaisesRegex(runner.WorkflowError, r"Строка 3: ожидается запись"):
+                runner.load_config(path)
 
     def test_api_error_has_machine_readable_json_and_nonzero_exit_code(self):
         with tempfile.TemporaryDirectory() as temporary:

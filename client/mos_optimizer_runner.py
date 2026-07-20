@@ -1,7 +1,7 @@
 """Command-line entry point for unattended MOS optimization.
 
 Example:
-    mos-optimizer-runner.exe 123 --config C:\\Altawin\\mos_optimizer.json
+    mos-optimizer-runner.exe 123 --config C:\\Altawin\\linear_optimizer_mos.txt
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import json
 import logging
+import re
 import sys
 from dataclasses import fields
 from pathlib import Path
@@ -54,40 +55,70 @@ class LogWriter:
 
 def default_config_path() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().with_name("mos_optimizer.json")
-    return Path(__file__).resolve().with_name("mos_optimizer.json")
+        return Path(sys.executable).resolve().with_name("linear_optimizer_mos.txt")
+    return Path(__file__).resolve().with_name("linear_optimizer_mos.txt")
+
+
+def _read_config_text(path: Path) -> str:
+    """Read a technology config saved by Notepad in a supported encoding."""
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError as error:
+        raise WorkflowError(
+            "Не найден файл конфигурации: "
+            f"{path}. Скопируйте linear_optimizer_mos.example.txt "
+            "в linear_optimizer_mos.txt.",
+            "configuration",
+        ) from error
+    for encoding in ("utf-8-sig", "cp1251"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise WorkflowError(
+        f"Не удалось прочитать {path}: используйте UTF-8, UTF-8 BOM или Windows-1251 (ANSI).",
+        "configuration",
+    )
+
+
+def _strip_inline_comment(value: str) -> str:
+    """Remove an optional ``#`` or ``;`` comment after a value."""
+    positions = [position for marker in ("#", ";") if (position := value.find(marker)) >= 0]
+    return value[: min(positions)].strip() if positions else value.strip()
+
+
+def _configuration_error(line_number: int, message: str) -> WorkflowError:
+    return WorkflowError(f"Строка {line_number}: {message}", "configuration")
+
+
+def _parse_bool(value: str, line_number: int, parameter: str) -> bool:
+    normalized = value.strip().casefold()
+    if normalized in {"да", "true", "1"}:
+        return True
+    if normalized in {"нет", "false", "0"}:
+        return False
+    raise _configuration_error(
+        line_number,
+        f"параметр {parameter} должен быть «да»/«нет», true/false или 1/0",
+    )
+
+
+def _parse_int(value: str, line_number: int, parameter: str) -> int:
+    if not re.fullmatch(r"[+-]?\d+", value.strip()):
+        raise _configuration_error(line_number, f"параметр {parameter} должен быть целым числом")
+    return int(value)
+
+
+def _parse_float(value: str, line_number: int, parameter: str) -> float:
+    try:
+        return float(value.strip().replace(",", "."))
+    except ValueError as error:
+        raise _configuration_error(line_number, f"параметр {parameter} должен быть числом") from error
 
 
 def load_config(path: Path) -> tuple[str, WorkflowSettings, Optional[Path]]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as error:
-        raise WorkflowError(
-            f"Не найден файл конфигурации: {path}. Скопируйте mos_optimizer.example.json в mos_optimizer.json.",
-            "configuration",
-        ) from error
-    except json.JSONDecodeError as error:
-        raise WorkflowError(f"Некорректный JSON в {path}: {error}", "configuration") from error
-
-    if not isinstance(raw, dict):
-        raise WorkflowError("Корень конфигурации должен быть объектом JSON", "configuration")
-    allowed_root_keys = {"api_url", "log_file", "optimization", "operations"}
-    unknown_root_keys = sorted(
-        key for key in raw if not key.startswith("_") and key not in allowed_root_keys
-    )
-    if unknown_root_keys:
-        raise WorkflowError(
-            "Неизвестные разделы конфигурации: " + ", ".join(unknown_root_keys),
-            "configuration",
-        )
-    api_url = raw.get("api_url")
-    if not isinstance(api_url, str) or not api_url.strip():
-        raise WorkflowError("В конфигурации требуется непустой api_url", "configuration")
-
-    optimization = raw.get("optimization", {})
-    operations = raw.get("operations", {})
-    if not isinstance(optimization, dict) or not isinstance(operations, dict):
-        raise WorkflowError("Разделы optimization и operations должны быть объектами JSON", "configuration")
+    """Read flat ``parameter = value`` settings for the unattended runner."""
+    text = _read_config_text(path)
 
     aliases = {
         "blade_width_mm": "blade_width",
@@ -95,44 +126,60 @@ def load_config(path: Path) -> tuple[str, WorkflowSettings, Optional[Path]]:
         "begin_indent_mm": "begin_indent",
         "end_indent_mm": "end_indent",
     }
-    values: Dict[str, Any] = {}
-    for source in (optimization, operations):
-        for key, value in source.items():
-            # JSON has no comments. Explanatory keys in the supplied example
-            # intentionally begin with an underscore and have no effect.
-            if key.startswith("_"):
-                continue
-            values[aliases.get(key, key)] = value
-
     allowed = {item.name for item in fields(WorkflowSettings)}
-    unknown = sorted(set(values) - allowed)
-    if unknown:
-        raise WorkflowError(
-            "Неизвестные настройки runner: " + ", ".join(unknown),
-            "configuration",
-        )
+    defaults = WorkflowSettings()
+    values: Dict[str, Any] = {}
+    seen_lines: Dict[str, int] = {}
+    connection_values: Dict[str, str] = {}
+
+    for line_number, source_line in enumerate(text.splitlines(), start=1):
+        line = source_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if "=" not in line:
+            raise _configuration_error(line_number, "ожидается запись «параметр = значение»")
+        raw_key, raw_value = line.split("=", 1)
+        key = raw_key.strip().casefold()
+        value = _strip_inline_comment(raw_value)
+        if not key:
+            raise _configuration_error(line_number, "не указано имя параметра")
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", key):
+            raise _configuration_error(line_number, f"некорректное имя параметра «{raw_key.strip()}»")
+        if not value:
+            raise _configuration_error(line_number, f"не задано значение параметра {key}")
+
+        setting = aliases.get(key, key)
+        if setting in seen_lines:
+            raise _configuration_error(
+                line_number,
+                f"параметр {key} уже задан в строке {seen_lines[setting]}",
+            )
+        if key in {"api_url", "log_file"}:
+            connection_values[key] = value
+            seen_lines[setting] = line_number
+            continue
+        if setting not in allowed:
+            raise _configuration_error(line_number, f"неизвестный параметр {key}")
+
+        default = getattr(defaults, setting)
+        if isinstance(default, bool):
+            parsed_value = _parse_bool(value, line_number, key)
+        elif isinstance(default, int):
+            parsed_value = _parse_int(value, line_number, key)
+        else:
+            parsed_value = _parse_float(value, line_number, key)
+        values[setting] = parsed_value
+        seen_lines[setting] = line_number
+
+    api_url = connection_values.get("api_url", "").strip()
+    if not api_url:
+        raise WorkflowError("Не задан обязательный параметр api_url", "configuration")
     try:
         settings = WorkflowSettings(**values)
     except TypeError as error:
         raise WorkflowError(f"Некорректные настройки runner: {error}", "configuration") from error
 
-    defaults = WorkflowSettings()
-    for key, value in values.items():
-        default = getattr(defaults, key)
-        if isinstance(default, bool):
-            valid = isinstance(value, bool)
-        elif isinstance(default, int):
-            valid = isinstance(value, int) and not isinstance(value, bool)
-        else:
-            valid = isinstance(value, (int, float)) and not isinstance(value, bool)
-        if not valid:
-            expected = "true или false" if isinstance(default, bool) else "число"
-            raise WorkflowError(
-                f"Параметр {key} должен быть {expected}",
-                "configuration",
-            )
-
-    configured_log = raw.get("log_file")
+    configured_log = connection_values.get("log_file", "").strip()
     log_file = None
     if configured_log:
         log_file = Path(configured_log)
@@ -164,7 +211,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--config",
         type=Path,
         default=default_config_path(),
-        help="путь к mos_optimizer.json (по умолчанию рядом с EXE)",
+        help="путь к linear_optimizer_mos.txt (по умолчанию рядом с EXE)",
     )
     parser.add_argument(
         "--dry-run",

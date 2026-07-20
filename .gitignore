@@ -29,6 +29,7 @@ Thumbs.db
 
 # PyInstaller
 *.spec
+!linear-optimizer-headless.spec
 *.exe
 *.dll
 
@@ -53,7 +54,7 @@ ipython_config.py
 
 # Project specific
 user_settings.json
-client/mos_optimizer.json
+client/linear_optimizer_mos.txt
 optimization_results/
 temp/
 uploads/

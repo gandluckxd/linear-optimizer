@@ -1,0 +1,54 @@
+# Настройки headless-оптимизатора москитных сеток.
+# Скопируйте этот файл рядом с mos-optimizer-runner.exe
+# и переименуйте в linear_optimizer_mos.txt.
+#
+# Формат каждой настройки: параметр = значение
+# Пустые строки и комментарии, начинающиеся с # или ;, пропускаются.
+# Логические значения: да/нет, true/false или 1/0.
+# Дробные числа можно указывать через точку или запятую: 4.5 либо 4,5.
+
+# Адрес API, у которого есть доступ к Firebird.
+api_url = http://127.0.0.1:8001
+
+# Путь к журналу относительно этого TXT-файла.
+log_file = logs/mos-optimizer-runner.log
+
+# Линейный раскрой. Значения соответствуют прежнему GUI-клиенту.
+blade_width_mm = 5.0
+min_remainder_mm = 300.0
+max_waste_percent = 15.0
+pair_optimization = да
+use_remainders = да
+time_limit_seconds = 60
+begin_indent_mm = 10.0
+end_indent_mm = 10.0
+min_trash_mm = 50.0
+
+# Настройки парной оптимизации.
+pairing_exact_bonus = 3000.0
+pairing_partial_bonus = 1000.0
+pairing_partial_threshold = 0.7
+pairing_new_simple_bonus = 150.0
+
+# Раскрой полотна фибергласса.
+planar_min_remainder_width = 500.0
+planar_min_remainder_height = 500.0
+planar_cut_width = 1.0
+sheet_indent = 15.0
+remainder_indent = 15.0
+planar_max_waste_percent = 5.0
+use_warehouse_remnants = да
+allow_rotation = да
+
+# Операции после оптимизации.
+# --dry-run всегда отключает любые записи, независимо от этих параметров.
+save_result = да
+adjust_materials = да
+distribute_cells = да
+
+# Не сохранять неполный раскрой при автоматической выдаче в производство.
+# Укажите «нет» для полного повторения legacy-поведения GUI.
+require_complete_placement = да
+
+# Не сохранять результат при ошибке раскроя полотна для существующих деталей.
+require_fiberglass_success = да

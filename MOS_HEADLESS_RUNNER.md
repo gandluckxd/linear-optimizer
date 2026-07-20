@@ -7,8 +7,8 @@ workflow, что и GUI: загрузка профилей/материалов,
 
 ## Конфигурация и запуск
 
-Скопируйте `client/mos_optimizer.example.json` рядом с EXE как
-`mos_optimizer.json`, укажите `api_url`, затем выполните:
+Скопируйте `client/linear_optimizer_mos.example.txt` рядом с EXE как
+`linear_optimizer_mos.txt`, укажите `api_url`, затем выполните:
 
 ```powershell
 mos-optimizer-runner.exe 123 --dry-run
@@ -20,7 +20,7 @@ mos-optimizer-runner.exe 123
 
 ```powershell
 cd client
-py mos_optimizer_runner.py 123 --dry-run --config mos_optimizer.json
+py mos_optimizer_runner.py 123 --dry-run --config linear_optimizer_mos.txt
 ```
 
 `--dry-run` загружает данные и запускает оба оптимизатора, но не вызывает ни
@@ -29,8 +29,18 @@ py mos_optimizer_runner.py 123 --dry-run --config mos_optimizer.json
 `log_file` из конфигурации. В итоговом JSON есть количество деталей, карт и
 отход, предупреждения, а также `documents.outlay_id` и `documents.supply_id`.
 
-Конфигурация проверяет имена и типы параметров. Ключи с `_` в начале разрешены
-в любом разделе как пояснения и не влияют на расчёт.
+TXT открывается и редактируется обычным Блокнотом. Это плоский файл без
+разделов: каждая настройка задаётся как `имя = значение`. Строки с `#` или `;`
+в начале — комментарии; комментарий также можно поставить после значения.
+Логические параметры принимают `да`/`нет`, `true`/`false` или `1`/`0`; дробные
+числа можно писать через точку или запятую. Поддерживаются UTF-8, UTF-8 BOM и
+Windows-1251 (ANSI). Ошибка указывает номер неправильной строки.
+
+Чтобы использовать TXT-файл из другого места, передайте его явно:
+
+```powershell
+mos-optimizer-runner.exe 123 --config D:\Altawin\linear_optimizer_mos.txt
+```
 
 Коды завершения: `0` — успех, `2` — аргумент/конфиг, `3` — загрузка через API,
 `4` — оптимизация, `5` — запись результатов/склад/ячейки, `10` — неожиданная
@@ -57,10 +67,10 @@ py mos_optimizer_runner.py 123 --dry-run --config mos_optimizer.json
 
 ```powershell
 py -m pip install -r client\requirements-headless.txt
-py -m PyInstaller --noconfirm --clean --distpath dist\windows --workpath build\windows mos_optimizer_runner_windows.spec
-Copy-Item client\mos_optimizer.example.json dist\windows\mos_optimizer.json
+py -m PyInstaller --noconfirm --clean --distpath dist\windows --workpath build\windows linear-optimizer-headless.spec
+Copy-Item client\linear_optimizer_mos.example.txt dist\windows\linear_optimizer_mos.txt
 ```
 
 Результат: `dist\windows\mos-optimizer-runner.exe`. Рядом с ним должны лежать
-`mos_optimizer.json`; папка `logs` создаётся автоматически. macOS-сборка не
+`linear_optimizer_mos.txt`; папка `logs` создаётся автоматически. macOS-сборка не
 может заменить Windows `.exe`.
