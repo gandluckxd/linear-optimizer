@@ -7,6 +7,7 @@ perform a write to Firebird.
 from __future__ import annotations
 
 import codecs
+import copy
 import contextlib
 import io
 import json
@@ -21,7 +22,12 @@ if str(CLIENT_DIR) not in sys.path:
     sys.path.insert(0, str(CLIENT_DIR))
 
 import mos_optimizer_runner as runner
-from core.headless_workflow import MosOptimizationWorkflow, WorkflowSettings, build_summary
+from core.headless_workflow import (
+    MosOptimizationWorkflow,
+    WorkflowError,
+    WorkflowSettings,
+    build_summary,
+)
 from core.models import Profile, StockMaterial
 
 
@@ -30,6 +36,19 @@ class FakeApiClient:
 
     def __init__(self, _api_url: str = ""):
         self.calls: list[str] = []
+        self.state = {
+            "grorders_mos_id": 42,
+            "optimized_count": 0,
+            "detail_count": 0,
+            "missing_cell_count": 0,
+            "outlays": [],
+            "supplies": [],
+            "warehouse_content_matches": None,
+        }
+
+    def get_mos_job_state(self, _grorders_mos_id: int):
+        self.calls.append("get_mos_job_state")
+        return copy.deepcopy(self.state)
 
     def get_grorders_by_mos_id(self, grorders_mos_id: int):
         self.calls.append("get_grorders_by_mos_id")
@@ -64,15 +83,90 @@ class FakeApiClient:
 
     def upload_mos_data(self, **_kwargs):
         self.calls.append("upload_mos_data")
+        self.state["optimized_count"] = 1
+        self.state["detail_count"] = 1
+        self.state["missing_cell_count"] = 1
         return True
 
     def adjust_materials_altawin(self, *_args):
         self.calls.append("adjust_materials_altawin")
+        self.state["outlays"] = [
+            {"outlay_id": 81, "deleted": 0, "isapproved": 0}
+        ]
+        self.state["supplies"] = [
+            {"supply_id": 82, "deleted": 0, "isapproved": 0}
+        ]
+        self.state["warehouse_content_matches"] = True
         return {"success": True, "outlay_id": 81, "supply_id": 82}
 
     def distribute_cell_numbers(self, *_args, **_kwargs):
         self.calls.append("distribute_cell_numbers")
+        self.state["missing_cell_count"] = 0
         return {"success": True, "processed_items": 1}
+
+    def approve_mos_document(
+        self,
+        _grorders_mos_id: int,
+        document_type: str,
+        document_id: int,
+    ):
+        self.calls.append(f"approve_{document_type}_{document_id}")
+        collection = self.state["outlays" if document_type == "outlay" else "supplies"]
+        matching = [
+            item
+            for item in collection
+            if item[f"{document_type}_id"] == document_id
+        ]
+        matching[0]["isapproved"] = 1
+        return {"success": True, "document_type": document_type, "document_id": document_id}
+
+
+class ResumeApiClient(FakeApiClient):
+    """State left by a crash after warehouse documents were committed."""
+
+    def __init__(self):
+        super().__init__()
+        self.state = {
+            "grorders_mos_id": 42,
+            "optimized_count": 1,
+            "detail_count": 1,
+            "missing_cell_count": 1,
+            "outlays": [{"outlay_id": 19024, "deleted": 0, "isapproved": 0}],
+            "supplies": [{"supply_id": 12679, "deleted": 0, "isapproved": 0}],
+            "warehouse_content_matches": True,
+        }
+
+    def distribute_cell_numbers(self, *_args, **_kwargs):
+        result = super().distribute_cell_numbers(*_args, **_kwargs)
+        self.state["missing_cell_count"] = 0
+        return result
+
+
+class CompletedApiClient(ResumeApiClient):
+    def __init__(self):
+        super().__init__()
+        self.state["missing_cell_count"] = 0
+        self.state["outlays"][0]["isapproved"] = 1
+        self.state["supplies"][0]["isapproved"] = 1
+
+
+class OutlayApprovedApiClient(ResumeApiClient):
+    def __init__(self):
+        super().__init__()
+        self.state["missing_cell_count"] = 0
+        self.state["outlays"][0]["isapproved"] = 1
+
+
+class IncompleteCellDistributionApiClient(ResumeApiClient):
+    def distribute_cell_numbers(self, *_args, **_kwargs):
+        self.calls.append("distribute_cell_numbers")
+        return {"success": True, "processed_items": 0}
+
+
+class TimeoutAfterWarehouseCommitApiClient(FakeApiClient):
+    def adjust_materials_altawin(self, *_args):
+        super().adjust_materials_altawin(*_args)
+        raise TimeoutError("HTTP read timed out after server commit")
 
 
 class InsufficientMaterialApiClient(FakeApiClient):
@@ -84,6 +178,19 @@ class InsufficientMaterialApiClient(FakeApiClient):
 class BrokenApiClient(FakeApiClient):
     def get_grorders_by_mos_id(self, _grorders_mos_id):
         raise RuntimeError("API недоступен")
+
+
+class InconsistentApiClient(FakeApiClient):
+    def __init__(self, _api_url: str = ""):
+        super().__init__(_api_url)
+        self.state = {
+            "optimized_count": 1,
+            "detail_count": 1,
+            "missing_cell_count": 1,
+            "outlays": [{"outlay_id": 19024, "deleted": 0, "isapproved": 0}],
+            "supplies": [],
+            "warehouse_content_matches": None,
+        }
 
 
 class MosHeadlessWorkflowTests(unittest.TestCase):
@@ -117,10 +224,174 @@ api_url = http://fake-api:8001
         self.assertEqual(summary["linear"]["total_pieces_unplaced"], 0)
         self.assertEqual(summary["warehouse"]["outlay_id"], 81)
         self.assertEqual(summary["warehouse"]["supply_id"], 82)
+        write_calls = [
+            call
+            for call in api.calls
+            if call
+            in {
+                "upload_mos_data",
+                "adjust_materials_altawin",
+                "distribute_cell_numbers",
+                "approve_outlay_81",
+                "approve_supply_82",
+            }
+        ]
         self.assertEqual(
-            api.calls[-3:],
-            ["upload_mos_data", "adjust_materials_altawin", "distribute_cell_numbers"],
+            write_calls,
+            [
+                "upload_mos_data",
+                "adjust_materials_altawin",
+                "distribute_cell_numbers",
+                "approve_outlay_81",
+                "approve_supply_82",
+            ],
         )
+
+    def test_partial_commit_resumes_without_reuploading_or_creating_documents(self):
+        api = ResumeApiClient()
+        log: list[str] = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            run = MosOptimizationWorkflow(api, WorkflowSettings()).run(
+                42, progress=log.append
+            )
+
+        self.assertNotIn("get_stock_remainders", api.calls)
+        self.assertNotIn("get_stock_materials", api.calls)
+        self.assertNotIn("upload_mos_data", api.calls)
+        self.assertNotIn("adjust_materials_altawin", api.calls)
+        self.assertEqual(run.mode, "resume")
+        self.assertIn("distribute_cell_numbers", api.calls)
+        self.assertIn("approve_outlay_19024", api.calls)
+        self.assertIn("approve_supply_12679", api.calls)
+        self.assertEqual(api.state["missing_cell_count"], 0)
+        self.assertEqual(api.state["outlays"][0]["isapproved"], 1)
+        self.assertEqual(api.state["supplies"][0]["isapproved"], 1)
+        self.assertTrue(any("mode=resume" in line for line in log))
+        self.assertTrue(any("OUTLAYID=[19024]" in line for line in log))
+        self.assertIn(
+            "skip=adjust_materials_altawin reason=existing_warehouse_pair",
+            log,
+        )
+
+    def test_completed_job_is_a_noop(self):
+        api = CompletedApiClient()
+        log: list[str] = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            run = MosOptimizationWorkflow(api, WorkflowSettings()).run(
+                42, progress=log.append
+            )
+
+        self.assertEqual(run.mode, "noop")
+        self.assertEqual(api.calls, ["get_mos_job_state"])
+        self.assertEqual(run.materials_response["outlay_id"], 19024)
+        self.assertEqual(run.materials_response["supply_id"], 12679)
+        self.assertTrue(any("mode=noop" in line for line in log))
+        self.assertIn("skip=optimization reason=already_completed", log)
+
+    def test_only_draft_supply_is_approved_when_outlay_is_already_approved(self):
+        api = OutlayApprovedApiClient()
+        with contextlib.redirect_stdout(io.StringIO()):
+            run = MosOptimizationWorkflow(api, WorkflowSettings()).run(42)
+
+        self.assertEqual(run.mode, "resume")
+        self.assertNotIn("approve_outlay_19024", api.calls)
+        self.assertIn("approve_supply_12679", api.calls)
+        self.assertNotIn("distribute_cell_numbers", api.calls)
+
+    def test_documents_are_not_approved_while_cells_are_still_missing(self):
+        api = IncompleteCellDistributionApiClient()
+        with self.assertRaises(WorkflowError) as raised:
+            MosOptimizationWorkflow(api, WorkflowSettings()).run(42)
+
+        self.assertEqual(raised.exception.stage, "warehouse/resume")
+        self.assertIn("осталось деталей без ячейки: 1", str(raised.exception))
+        self.assertNotIn("approve_outlay_19024", api.calls)
+        self.assertNotIn("approve_supply_12679", api.calls)
+
+    def test_inconsistent_warehouse_states_never_write(self):
+        cases = {
+            "duplicate_pair": {
+                "optimized_count": 1,
+                "detail_count": 1,
+                "missing_cell_count": 1,
+                "outlays": [
+                    {"outlay_id": 19024, "deleted": 0, "isapproved": 0},
+                    {"outlay_id": 19025, "deleted": 0, "isapproved": 0},
+                ],
+                "supplies": [
+                    {"supply_id": 12679, "deleted": 0, "isapproved": 0},
+                    {"supply_id": 12680, "deleted": 0, "isapproved": 0},
+                ],
+                "warehouse_content_matches": None,
+            },
+            "outlay_only": {
+                "optimized_count": 1,
+                "detail_count": 1,
+                "missing_cell_count": 1,
+                "outlays": [{"outlay_id": 19024, "deleted": 0, "isapproved": 0}],
+                "supplies": [],
+                "warehouse_content_matches": None,
+            },
+            "supply_only": {
+                "optimized_count": 1,
+                "detail_count": 1,
+                "missing_cell_count": 1,
+                "outlays": [],
+                "supplies": [{"supply_id": 12679, "deleted": 0, "isapproved": 0}],
+                "warehouse_content_matches": None,
+            },
+            "documents_without_maps": {
+                "optimized_count": 0,
+                "detail_count": 0,
+                "missing_cell_count": 0,
+                "outlays": [{"outlay_id": 19024, "deleted": 0, "isapproved": 0}],
+                "supplies": [{"supply_id": 12679, "deleted": 0, "isapproved": 0}],
+                "warehouse_content_matches": False,
+            },
+            "content_mismatch": {
+                "optimized_count": 1,
+                "detail_count": 1,
+                "missing_cell_count": 1,
+                "outlays": [{"outlay_id": 19024, "deleted": 0, "isapproved": 0}],
+                "supplies": [{"supply_id": 12679, "deleted": 0, "isapproved": 0}],
+                "warehouse_content_matches": False,
+                "content_mismatches": ["OUTLAYDETAIL GOODSID=500"],
+            },
+        }
+        for name, state in cases.items():
+            with self.subTest(name=name):
+                api = FakeApiClient()
+                api.state = state
+                with self.assertRaises(WorkflowError) as raised:
+                    MosOptimizationWorkflow(api, WorkflowSettings()).run(42)
+                self.assertEqual(raised.exception.stage, "warehouse/resume")
+                self.assertIn("INCONSISTENT", str(raised.exception))
+                self.assertNotIn("upload_mos_data", api.calls)
+                self.assertNotIn("adjust_materials_altawin", api.calls)
+                self.assertNotIn("distribute_cell_numbers", api.calls)
+
+    def test_timeout_after_warehouse_commit_recovers_from_state_without_retry(self):
+        api = TimeoutAfterWarehouseCommitApiClient()
+        with contextlib.redirect_stdout(io.StringIO()):
+            run = MosOptimizationWorkflow(api, WorkflowSettings()).run(42)
+
+        self.assertEqual(run.mode, "fresh")
+        self.assertEqual(api.calls.count("adjust_materials_altawin"), 1)
+        self.assertEqual(run.materials_response["outlay_id"], 81)
+        self.assertEqual(run.materials_response["supply_id"], 82)
+        self.assertEqual(run.final_state["missing_cell_count"], 0)
+
+    def test_second_run_does_not_reserve_remainders_again(self):
+        api = FakeApiClient()
+        workflow = MosOptimizationWorkflow(api, WorkflowSettings())
+        with contextlib.redirect_stdout(io.StringIO()):
+            first = workflow.run(42)
+            second = workflow.run(42)
+
+        self.assertEqual(first.mode, "fresh")
+        self.assertEqual(second.mode, "noop")
+        self.assertEqual(api.calls.count("upload_mos_data"), 1)
+        self.assertEqual(api.calls.count("adjust_materials_altawin"), 1)
 
     def test_dry_run_never_calls_write_methods(self):
         api = FakeApiClient()
@@ -236,6 +507,21 @@ blade_width = 6""",
         self.assertFalse(result["success"])
         self.assertEqual(result["stage"], "loading")
         self.assertIn("API недоступен", result["error"])
+
+    def test_inconsistent_state_has_controlled_resume_stage_and_save_exit_code(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self.write_config(Path(temporary))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = runner.main(
+                    ["42", "--config", str(config)],
+                    api_client_factory=InconsistentApiClient,
+                )
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, runner.EXIT_SAVE_ERROR)
+        self.assertEqual(result["stage"], "warehouse/resume")
+        self.assertIn("OUTLAYID=[19024]", result["error"])
 
     def test_optimization_error_has_machine_readable_json_and_nonzero_exit_code(self):
         with tempfile.TemporaryDirectory() as temporary:

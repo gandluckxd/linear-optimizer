@@ -1256,6 +1256,314 @@ def delete_optimized_mos_by_grorders_mos_id(grorders_mos_id: int) -> bool:
         raise
 
 
+def _mos_warehouse_comments(grorders_mos_id: int) -> tuple[str, str]:
+    return (
+        f"Списание материалов для оптимизации москитных сеток: {grorders_mos_id}",
+        f"Приход деловых остатков от оптимизации москитных сеток: {grorders_mos_id}",
+    )
+
+
+def _read_mos_warehouse_documents(cur, grorders_mos_id: int) -> tuple[list, list]:
+    outlay_comment, supply_comment = _mos_warehouse_comments(grorders_mos_id)
+    cur.execute(
+        """
+        SELECT OUTLAYID, DELETED, ISAPPROVED, GUID
+        FROM OUTLAY
+        WHERE TRIM(RCOMMENT) = ?
+        ORDER BY OUTLAYID
+        """,
+        (outlay_comment,),
+    )
+    outlays = [
+        {
+            "outlay_id": int(row[0]),
+            "deleted": int(row[1] or 0),
+            "isapproved": int(row[2] or 0),
+            "guid": str(row[3]).strip() if row[3] is not None else None,
+        }
+        for row in cur.fetchall()
+    ]
+    cur.execute(
+        """
+        SELECT SUPPLYID, DELETED, ISAPPROVED, GUID
+        FROM SUPPLY
+        WHERE TRIM(RCOMMENT) = ?
+        ORDER BY SUPPLYID
+        """,
+        (supply_comment,),
+    )
+    supplies = [
+        {
+            "supply_id": int(row[0]),
+            "deleted": int(row[1] or 0),
+            "isapproved": int(row[2] or 0),
+            "guid": str(row[3]).strip() if row[3] is not None else None,
+        }
+        for row in cur.fetchall()
+    ]
+    return outlays, supplies
+
+
+def _active_mos_documents(documents: list) -> list:
+    return [item for item in documents if int(item.get("deleted", 0) or 0) == 0]
+
+
+def _number(value: Any) -> float:
+    return round(float(value or 0), 6)
+
+
+def _aggregate_document_rows(cur, table: str, id_column: str, document_id: int) -> dict:
+    allowed = {
+        ("OUTLAYDETAIL", "OUTLAYID"): ("GOODSID",),
+        ("OUTLAYREMAINDER", "OUTLAYID"): ("GOODSID", "THICK", "WIDTH", "HEIGHT"),
+        ("SUPPLYREMAINDER", "SUPPLYID"): ("GOODSID", "THICK", "WIDTH", "HEIGHT"),
+    }
+    dimensions = allowed[(table, id_column)]
+    dimension_sql = ", ".join(dimensions)
+    cur.execute(
+        f"""
+        SELECT {dimension_sql}, SUM(QTY)
+        FROM {table}
+        WHERE {id_column} = ?
+        GROUP BY {dimension_sql}
+        """,
+        (document_id,),
+    )
+    result = {}
+    for row in cur.fetchall():
+        key = tuple(int(value or 0) for value in row[:-1])
+        result[key] = _number(row[-1])
+    return result
+
+
+def _compare_expected_rows(
+    label: str,
+    expected: dict,
+    actual: dict,
+    mismatches: list,
+) -> None:
+    expected_goodsids = {key[0] for key in expected}
+    for key, expected_qty in expected.items():
+        actual_qty = actual.get(key)
+        if actual_qty != expected_qty:
+            mismatches.append(
+                f"{label} {key}: ожидалось QTY={expected_qty}, найдено {actual_qty}"
+            )
+    for key, actual_qty in actual.items():
+        if key[0] in expected_goodsids and key not in expected:
+            mismatches.append(
+                f"{label} содержит лишнюю строку задания {key} QTY={actual_qty}"
+            )
+
+
+def _validate_mos_warehouse_pair(
+    cur,
+    grorders_mos_id: int,
+    outlay: dict,
+    supply: dict,
+) -> tuple[bool, list]:
+    """Validate the profile part of a pair against persisted cutting maps.
+
+    Transferred mosquito accessories and fiberglass rows are allowed as extra
+    rows because their source payload is not persisted in OPTIMIZED_MOS.
+    Profile rows, which are fully reconstructable from the saved maps, must
+    match exactly.
+    """
+    mismatches: list[str] = []
+    if not outlay.get("guid") or not supply.get("guid"):
+        mismatches.append("у складской пары отсутствует GUID")
+    elif outlay.get("guid") != supply.get("guid"):
+        mismatches.append(
+            f"GUID пары различается: OUTLAY={outlay.get('guid')}, SUPPLY={supply.get('guid')}"
+        )
+
+    cur.execute(
+        """
+        SELECT
+            om.GOODSID,
+            om.ISBAR,
+            om.LONGPROF,
+            om.OSTAT,
+            om.MINREST,
+            om.QTY,
+            gg.THICK
+        FROM OPTIMIZED_MOS om
+        JOIN GOODS g ON g.GOODSID = om.GOODSID
+        JOIN GROUPGOODS gg ON gg.GRGOODSID = g.GRGOODSID
+        WHERE om.GRORDER_MOS_ID = ?
+        """,
+        (grorders_mos_id,),
+    )
+    maps = cur.fetchall()
+    if not maps:
+        return False, ["OPTIMIZED_MOS отсутствует"]
+
+    expected_details: dict[tuple, float] = {}
+    expected_outlay_remainders: dict[tuple, float] = {}
+    expected_supply_remainders: dict[tuple, float] = {}
+    for goodsid, isbar, longprof, ostat, minrest, qty, group_thick in maps:
+        goodsid = int(goodsid)
+        qty_value = _number(qty)
+        if int(isbar or 0) == 1:
+            key = (goodsid, int(longprof or 0), 0, 0)
+            expected_outlay_remainders[key] = (
+                expected_outlay_remainders.get(key, 0) + qty_value
+            )
+        else:
+            key = (goodsid,)
+            expected_details[key] = (
+                expected_details.get(key, 0)
+                + _number(qty_value * float(group_thick or 6000))
+            )
+        if float(ostat or 0) > 0 and float(ostat or 0) >= float(minrest or 0):
+            key = (goodsid, int(ostat or 0), 0, 0)
+            expected_supply_remainders[key] = (
+                expected_supply_remainders.get(key, 0) + qty_value
+            )
+
+    actual_details = _aggregate_document_rows(
+        cur, "OUTLAYDETAIL", "OUTLAYID", outlay["outlay_id"]
+    )
+    actual_outlay_remainders = _aggregate_document_rows(
+        cur, "OUTLAYREMAINDER", "OUTLAYID", outlay["outlay_id"]
+    )
+    actual_supply_remainders = _aggregate_document_rows(
+        cur, "SUPPLYREMAINDER", "SUPPLYID", supply["supply_id"]
+    )
+    _compare_expected_rows(
+        "OUTLAYDETAIL", expected_details, actual_details, mismatches
+    )
+    _compare_expected_rows(
+        "OUTLAYREMAINDER",
+        expected_outlay_remainders,
+        actual_outlay_remainders,
+        mismatches,
+    )
+    _compare_expected_rows(
+        "SUPPLYREMAINDER",
+        expected_supply_remainders,
+        actual_supply_remainders,
+        mismatches,
+    )
+    return not mismatches, mismatches
+
+
+def get_mos_optimization_state(grorders_mos_id: int) -> dict:
+    """Return the read-only preflight state used by runner and API retries."""
+    con = get_db_connection()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            """
+            SELECT
+                (SELECT COUNT(*)
+                 FROM OPTIMIZED_MOS om
+                 WHERE om.GRORDER_MOS_ID = ?) AS OPTIMIZED_COUNT,
+                (SELECT COUNT(*)
+                 FROM OPTDETAIL_MOS od
+                 JOIN OPTIMIZED_MOS om
+                   ON om.OPTIMIZED_MOS_ID = od.OPTIMIZED_MOS_ID
+                 WHERE om.GRORDER_MOS_ID = ?) AS DETAIL_COUNT,
+                (SELECT COUNT(*)
+                 FROM OPTDETAIL_MOS od
+                 JOIN OPTIMIZED_MOS om
+                   ON om.OPTIMIZED_MOS_ID = od.OPTIMIZED_MOS_ID
+                 WHERE om.GRORDER_MOS_ID = ?
+                   AND od.CELL_NUMBER IS NULL) AS MISSING_CELL_COUNT
+            FROM RDB$DATABASE
+            """,
+            (grorders_mos_id, grorders_mos_id, grorders_mos_id),
+        )
+        count_row = cur.fetchone()
+        outlays, supplies = _read_mos_warehouse_documents(cur, grorders_mos_id)
+        active_outlays = _active_mos_documents(outlays)
+        active_supplies = _active_mos_documents(supplies)
+        content_matches = None
+        mismatches: list[str] = []
+        if len(active_outlays) == 1 and len(active_supplies) == 1:
+            content_matches, mismatches = _validate_mos_warehouse_pair(
+                cur,
+                grorders_mos_id,
+                active_outlays[0],
+                active_supplies[0],
+            )
+        return {
+            "grorders_mos_id": int(grorders_mos_id),
+            "optimized_count": int(count_row[0] or 0),
+            "detail_count": int(count_row[1] or 0),
+            "missing_cell_count": int(count_row[2] or 0),
+            "outlays": outlays,
+            "supplies": supplies,
+            "warehouse_content_matches": content_matches,
+            "content_mismatches": mismatches,
+        }
+    finally:
+        con.close()
+
+
+def approve_mos_warehouse_document(
+    grorders_mos_id: int,
+    document_type: str,
+    document_id: int,
+) -> dict:
+    """Approve one MOS document; an already approved header is a no-op."""
+    if document_type not in {"outlay", "supply"}:
+        raise ValueError(f"Неизвестный тип документа: {document_type}")
+    table = "OUTLAY" if document_type == "outlay" else "SUPPLY"
+    id_column = "OUTLAYID" if document_type == "outlay" else "SUPPLYID"
+    expected_comment = _mos_warehouse_comments(grorders_mos_id)[
+        0 if document_type == "outlay" else 1
+    ]
+    con = get_db_connection()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            f"""
+            SELECT DELETED, ISAPPROVED
+            FROM {table}
+            WHERE {id_column} = ? AND TRIM(RCOMMENT) = ?
+            """,
+            (document_id, expected_comment),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(
+                f"{document_type} ID={document_id} не принадлежит GRORDERS_MOS_ID={grorders_mos_id}"
+            )
+        if int(row[0] or 0) != 0:
+            raise ValueError(f"{document_type} ID={document_id} помечен удалённым")
+        if int(row[1] or 0) == 1:
+            return {
+                "success": True,
+                "document_type": document_type,
+                "document_id": int(document_id),
+                "skipped": True,
+            }
+        try:
+            cur.execute(
+                f"""
+                UPDATE {table}
+                SET ISAPPROVED = 1, DATEMODIFIED = CURRENT_TIMESTAMP
+                WHERE {id_column} = ? AND DELETED = 0 AND ISAPPROVED = 0
+                """,
+                (document_id,),
+            )
+            con.commit()
+        except Exception as error:
+            con.rollback()
+            raise RuntimeError(
+                f"Firebird: ошибка проводки {document_type} ID={document_id}: {error}"
+            ) from error
+        return {
+            "success": True,
+            "document_type": document_type,
+            "document_id": int(document_id),
+            "skipped": False,
+        }
+    finally:
+        con.close()
+
+
 def adjust_materials_for_moskitka_optimization(
     grorders_mos_id: int, 
     used_materials: list = None, 
@@ -1289,14 +1597,66 @@ def adjust_materials_for_moskitka_optimization(
         con = get_db_connection()
         cur = con.cursor()
 
+        # Serialize creation attempts for one MOS task.  The lock and the
+        # existing-pair lookup live in the same transaction as both INSERTs.
+        cur.execute(
+            "SELECT NAME FROM GRORDERS_MOS WHERE ID = ? WITH LOCK",
+            (grorders_mos_id,),
+        )
+        grorder_mos_result = cur.fetchone()
+        if not grorder_mos_result:
+            raise ValueError(f"GRORDERS_MOS_ID={grorders_mos_id} не найден")
+        grorder_mos_name = (
+            grorder_mos_result[0]
+            if grorder_mos_result[0]
+            else f"Москитные сетки {grorders_mos_id}"
+        )
+
+        existing_outlays, existing_supplies = _read_mos_warehouse_documents(
+            cur, grorders_mos_id
+        )
+        active_outlays = _active_mos_documents(existing_outlays)
+        active_supplies = _active_mos_documents(existing_supplies)
+        if active_outlays or active_supplies:
+            outlay_ids = [item["outlay_id"] for item in active_outlays]
+            supply_ids = [item["supply_id"] for item in active_supplies]
+            if len(active_outlays) != 1 or len(active_supplies) != 1:
+                raise ValueError(
+                    "INCONSISTENT складская пара перед INSERT: "
+                    f"OUTLAYID={outlay_ids}, SUPPLYID={supply_ids}"
+                )
+            content_matches, mismatches = _validate_mos_warehouse_pair(
+                cur,
+                grorders_mos_id,
+                active_outlays[0],
+                active_supplies[0],
+            )
+            if not content_matches:
+                raise ValueError(
+                    "Существующая складская пара не соответствует картам: "
+                    + "; ".join(mismatches)
+                    + f"; OUTLAYID={outlay_ids}, SUPPLYID={supply_ids}"
+                )
+            con.commit()
+            con.close()
+            total_time = time.time() - operation_start_time
+            print(
+                "✅ DB: Повторно используется существующая складская пара "
+                f"OUTLAYID={outlay_ids[0]}, SUPPLYID={supply_ids[0]}"
+            )
+            return {
+                "success": True,
+                "message": "Использована существующая складская пара",
+                "outlay_id": outlay_ids[0],
+                "supply_id": supply_ids[0],
+                "reused": True,
+                "transferred_materials_count": 0,
+                "transferred_records_count": 0,
+                "performance": {"total_time": round(total_time, 2)},
+            }
+
         # 1. Создаем новое списание материалов для всех grorder
         print(f"🔧 DB: Создание нового списания материалов...")
-        
-        # Получаем информацию о сменном задании москитных сеток для комментария
-        grorder_mos_sql = "SELECT name FROM grorders_mos WHERE id = ?"
-        cur.execute(grorder_mos_sql, (grorders_mos_id,))
-        grorder_mos_result = cur.fetchone()
-        grorder_mos_name = grorder_mos_result[0] if grorder_mos_result else f"Москитные сетки {grorders_mos_id}"
         
         # Создаем одно списание для всех grorder
         # Получаем новый GUID
@@ -1322,7 +1682,7 @@ def adjust_materials_for_moskitka_optimization(
             0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, ?
         )
         """
-        comment = f"Списание материалов для оптимизации москитных сеток: {grorder_mos_name}"
+        comment, supply_comment = _mos_warehouse_comments(grorders_mos_id)
         cur.execute(create_outlay_sql, (waybill, comment, guidhi, guidlo, guid))
         
         # Получаем ID созданного списания
@@ -1348,7 +1708,6 @@ def adjust_materials_for_moskitka_optimization(
             0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL, NULL, ?
         )
         """
-        supply_comment = f"Приход деловых остатков от оптимизации москитных сеток: {grorder_mos_name}"
         cur.execute(create_supply_sql, (grorder_mos_name, supply_comment, guidhi, guidlo, guid))
         
         # Получаем ID созданного прихода
@@ -1602,6 +1961,7 @@ def adjust_materials_for_moskitka_optimization(
             "message": "Материалы успешно скорректированы",
             "outlay_id": outlay_id,
             "supply_id": supply_id,
+            "reused": False,
             "transferred_materials_count": len(transferred_materials),
             "transferred_records_count": records_count,
             "performance": {

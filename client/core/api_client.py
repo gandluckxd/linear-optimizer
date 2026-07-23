@@ -590,6 +590,49 @@ class APIClient:
             print(f"❌ API Client: Ошибка загрузки данных MOS: {str(e)}")
             raise Exception(f"Ошибка загрузки данных MOS: {str(e)}")
 
+    def get_mos_job_state(self, grorders_mos_id: int) -> dict:
+        """Read persisted maps, cells and warehouse documents for preflight."""
+        try:
+            response = self.session.get(
+                f"{self.base_url}/api/mos-job-state/{grorders_mos_id}",
+                timeout=30,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if not isinstance(result, dict):
+                raise ValueError("API вернул состояние в неверном формате")
+            return result
+        except requests.RequestException as e:
+            raise Exception(
+                f"Ошибка получения состояния GRORDERS_MOS_ID={grorders_mos_id}: {e}"
+            ) from e
+
+    def approve_mos_document(
+        self,
+        grorders_mos_id: int,
+        document_type: str,
+        document_id: int,
+    ) -> dict:
+        """Idempotently approve one known document belonging to the MOS task."""
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/mos-warehouse-document/approve",
+                json={
+                    "grorders_mos_id": grorders_mos_id,
+                    "document_type": document_type,
+                    "document_id": document_id,
+                },
+                timeout=120,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            # The caller must re-read job state: the database commit may have
+            # succeeded even when this HTTP response was lost.
+            raise Exception(
+                f"Неопределённый результат проводки {document_type} ID={document_id}: {e}"
+            ) from e
+
     def distribute_cell_numbers(self, grorders_mos_id: int, cell_map: Dict[str, int] = None) -> dict:
         """
         Распределить номера ячеек для оптимизации москитных сеток.
@@ -686,4 +729,4 @@ def get_api_client() -> APIClient:
 def set_api_url(url: str):
     """Установить URL API"""
     global _api_client
-    _api_client = APIClient(url) 
+    _api_client = APIClient(url)

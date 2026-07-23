@@ -258,7 +258,7 @@ def exit_code_for(error: WorkflowError) -> int:
         return EXIT_ARGUMENT_ERROR
     if error.stage == "loading":
         return EXIT_API_ERROR
-    if error.stage in {"saving", "warehouse", "cells"}:
+    if error.stage in {"saving", "warehouse", "warehouse/resume", "cells"}:
         return EXIT_SAVE_ERROR
     return EXIT_OPTIMIZATION_ERROR
 

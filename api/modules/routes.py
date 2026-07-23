@@ -32,7 +32,9 @@ from utils.db_functions import (
     delete_grorders_mos,
     delete_optimized_mos_by_grorders_mos_id,
     distribute_cell_numbers,
-    insert_optdetail_mos_bulk
+    insert_optdetail_mos_bulk,
+    get_mos_optimization_state,
+    approve_mos_warehouse_document,
 )
 from utils.db_functions import (
     load_fiberglass_data,
@@ -427,6 +429,44 @@ async def delete_grorders_mos_endpoint(grorders_mos_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/mos-job-state/{grorders_mos_id}")
+async def mos_job_state(grorders_mos_id: int):
+    """Read-only preflight state for an idempotent MOS runner."""
+    try:
+        return get_mos_optimization_state(grorders_mos_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка получения состояния GRORDERS_MOS_ID={grorders_mos_id}: {e}",
+        )
+
+
+@router.post("/mos-warehouse-document/approve")
+async def approve_mos_document_endpoint(request: dict):
+    """Idempotently approve one existing OUTLAY or SUPPLY document."""
+    grorders_mos_id = request.get("grorders_mos_id")
+    document_type = request.get("document_type")
+    document_id = request.get("document_id")
+    if not grorders_mos_id or not document_type or not document_id:
+        raise HTTPException(
+            status_code=400,
+            detail="grorders_mos_id, document_type и document_id обязательны",
+        )
+    try:
+        return approve_mos_warehouse_document(
+            int(grorders_mos_id),
+            str(document_type),
+            int(document_id),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Ошибка проводки {document_type} ID={document_id}: {e}"
+            ),
+        )
+
+
 @router.post("/adjust-materials-altawin")
 async def adjust_materials_altawin(request: dict):
     """
@@ -576,4 +616,3 @@ async def get_fiberglass_remainders_endpoint(request: FiberglassMaterialsRequest
         return remainders
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка получения остатков фибергласса: {str(e)}")
-

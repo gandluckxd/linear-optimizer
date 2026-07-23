@@ -115,13 +115,17 @@ class OptimizationInput:
 @dataclass
 class WorkflowRun:
     input_data: OptimizationInput
-    linear_result: Any
+    linear_result: Optional[Any]
     fiberglass_result: Optional[Any]
     cell_map: Dict[str, int]
     upload_response: Optional[dict] = None
     materials_response: Optional[dict] = None
     cells_response: Optional[dict] = None
     dry_run: bool = False
+    mode: str = "fresh"
+    initial_state: Optional[dict] = None
+    final_state: Optional[dict] = None
+    skipped_steps: List[str] = field(default_factory=list)
 
 
 def _emit(progress: Optional[ProgressFn], message: str) -> None:
@@ -257,6 +261,133 @@ def generate_cell_map(profiles: Sequence[Profile], fabric_details: Sequence[Any]
             sorted(unique_items, key=lambda item: (item[0], item[1])), start=1
         )
     }
+
+
+def load_cell_map_input(
+    api_client: Any,
+    grorders_mos_id: int,
+    progress: Optional[ProgressFn] = None,
+) -> OptimizationInput:
+    """Load only the immutable order data needed by ``generate_cell_map``."""
+    try:
+        _emit(progress, f"RESUME: получение СЗ для GRORDERS_MOS_ID={grorders_mos_id}")
+        grorder_ids = list(api_client.get_grorders_by_mos_id(grorders_mos_id))
+        if not grorder_ids:
+            raise WorkflowError(
+                f"Для GRORDERS_MOS_ID={grorders_mos_id} не найдены связанные сменные задания",
+                "loading",
+            )
+
+        profiles: List[Profile] = []
+        for grorder_id in grorder_ids:
+            profiles.extend(api_client.get_profiles(grorder_id))
+
+        warnings: List[str] = []
+        fabric_details: list = []
+        try:
+            fabric_details = api_client.get_fiberglass_details(grorders_mos_id)
+        except Exception as error:
+            warning = f"Не удалось загрузить детали фибергласса для карты ячеек: {error}"
+            warnings.append(warning)
+            _emit(progress, f"ПРЕДУПРЕЖДЕНИЕ: {warning}")
+
+        return OptimizationInput(
+            grorders_mos_id=grorders_mos_id,
+            grorder_ids=grorder_ids,
+            profiles=profiles,
+            stock_remainders=[],
+            stock_materials=[],
+            stocks=[],
+            fabric_details=fabric_details,
+            fabric_remainders=[],
+            fabric_materials=[],
+            warnings=warnings,
+        )
+    except WorkflowError:
+        raise
+    except Exception as error:
+        raise WorkflowError(
+            f"Не удалось загрузить входные данные для возобновления: {error}",
+            "loading",
+        ) from error
+
+
+def empty_optimization_input(grorders_mos_id: int) -> OptimizationInput:
+    """Represent a no-op run without loading optimizer inputs."""
+    return OptimizationInput(
+        grorders_mos_id=grorders_mos_id,
+        grorder_ids=[],
+        profiles=[],
+        stock_remainders=[],
+        stock_materials=[],
+        stocks=[],
+        fabric_details=[],
+        fabric_remainders=[],
+        fabric_materials=[],
+    )
+
+
+def active_documents(state: dict, document_type: str) -> List[dict]:
+    collection = "outlays" if document_type == "outlay" else "supplies"
+    return [
+        document
+        for document in state.get(collection, [])
+        if int(document.get("deleted", 0) or 0) == 0
+    ]
+
+
+def document_id(document: dict, document_type: str) -> Optional[int]:
+    value = document.get("outlay_id" if document_type == "outlay" else "supply_id")
+    return int(value) if value is not None else None
+
+
+def classify_job_state(state: dict) -> tuple[str, List[str]]:
+    """Classify persisted state before any destructive or reserving operation."""
+    optimized_count = int(state.get("optimized_count", 0) or 0)
+    detail_count = int(state.get("detail_count", 0) or 0)
+    missing_cell_count = int(state.get("missing_cell_count", 0) or 0)
+    outlays = active_documents(state, "outlay")
+    supplies = active_documents(state, "supply")
+    issues: List[str] = []
+
+    if len(outlays) > 1:
+        issues.append(
+            "найдено несколько активных расходов: "
+            + ", ".join(str(document_id(item, "outlay")) for item in outlays)
+        )
+    if len(supplies) > 1:
+        issues.append(
+            "найдено несколько активных приходов: "
+            + ", ".join(str(document_id(item, "supply")) for item in supplies)
+        )
+    if bool(outlays) != bool(supplies):
+        issues.append(
+            "неполная складская пара: "
+            f"OUTLAYID={[document_id(item, 'outlay') for item in outlays]}, "
+            f"SUPPLYID={[document_id(item, 'supply') for item in supplies]}"
+        )
+
+    if outlays or supplies:
+        if optimized_count <= 0 or detail_count <= 0:
+            issues.append(
+                "складские документы существуют, но карты/детали отсутствуют: "
+                f"maps={optimized_count}, details={detail_count}"
+            )
+        if state.get("warehouse_content_matches") is not True:
+            mismatches = state.get("content_mismatches") or []
+            suffix = f": {'; '.join(map(str, mismatches))}" if mismatches else ""
+            issues.append(f"содержимое складских документов не соответствует заданию{suffix}")
+
+    if issues:
+        return "inconsistent", issues
+    if not outlays and not supplies:
+        return "fresh", []
+
+    outlay_approved = int(outlays[0].get("isapproved", 0) or 0) == 1
+    supply_approved = int(supplies[0].get("isapproved", 0) or 0) == 1
+    if missing_cell_count == 0 and outlay_approved and supply_approved:
+        return "noop", []
+    return "resume", []
 
 
 def optimize_linear(
@@ -441,6 +572,265 @@ class MosOptimizationWorkflow:
         self.api_client = api_client
         self.settings = settings
 
+    def _get_state(
+        self,
+        grorders_mos_id: int,
+        *,
+        stage: str = "warehouse/resume",
+    ) -> dict:
+        try:
+            state = self.api_client.get_mos_job_state(grorders_mos_id)
+            if not isinstance(state, dict):
+                raise TypeError(f"ожидался объект, получено {type(state).__name__}")
+            return state
+        except WorkflowError:
+            raise
+        except Exception as error:
+            raise WorkflowError(
+                f"Не удалось получить состояние GRORDERS_MOS_ID={grorders_mos_id}: {error}",
+                stage,
+            ) from error
+
+    def _emit_state(
+        self,
+        state: dict,
+        mode: str,
+        progress: Optional[ProgressFn],
+    ) -> None:
+        outlay_ids = [
+            document_id(item, "outlay") for item in active_documents(state, "outlay")
+        ]
+        supply_ids = [
+            document_id(item, "supply") for item in active_documents(state, "supply")
+        ]
+        _emit(
+            progress,
+            "mode=%s maps=%s details=%s missing_cells=%s OUTLAYID=%s SUPPLYID=%s"
+            % (
+                mode,
+                int(state.get("optimized_count", 0) or 0),
+                int(state.get("detail_count", 0) or 0),
+                int(state.get("missing_cell_count", 0) or 0),
+                outlay_ids,
+                supply_ids,
+            ),
+        )
+
+    def _warehouse_response_from_state(self, state: dict) -> dict:
+        outlays = active_documents(state, "outlay")
+        supplies = active_documents(state, "supply")
+        return {
+            "success": len(outlays) == 1 and len(supplies) == 1,
+            "outlay_id": document_id(outlays[0], "outlay") if len(outlays) == 1 else None,
+            "supply_id": document_id(supplies[0], "supply") if len(supplies) == 1 else None,
+            "reused": True,
+        }
+
+    def _require_consistent_state(
+        self,
+        state: dict,
+        progress: Optional[ProgressFn],
+    ) -> str:
+        mode, issues = classify_job_state(state)
+        self._emit_state(state, mode, progress)
+        if mode == "inconsistent":
+            outlay_ids = [
+                document_id(item, "outlay") for item in active_documents(state, "outlay")
+            ]
+            supply_ids = [
+                document_id(item, "supply") for item in active_documents(state, "supply")
+            ]
+            raise WorkflowError(
+                "INCONSISTENT: "
+                + "; ".join(issues)
+                + f"; проблемные OUTLAYID={outlay_ids}, SUPPLYID={supply_ids}",
+                "warehouse/resume",
+            )
+        return mode
+
+    def _approve_document(
+        self,
+        grorders_mos_id: int,
+        document_type: str,
+        document: dict,
+        progress: Optional[ProgressFn],
+    ) -> None:
+        document_id_value = document_id(document, document_type)
+        if int(document.get("isapproved", 0) or 0) == 1:
+            _emit(
+                progress,
+                f"skip=approve_{document_type} id={document_id_value} reason=already_approved",
+            )
+            return
+        try:
+            _emit(progress, f"Проводка {document_type} ID={document_id_value}")
+            result = self.api_client.approve_mos_document(
+                grorders_mos_id,
+                document_type,
+                document_id_value,
+            )
+            if not isinstance(result, dict) or not result.get("success"):
+                raise RuntimeError(result)
+        except Exception as error:
+            # The update may have committed even when the HTTP response was
+            # lost. Re-read the header before deciding whether it failed.
+            recovered = self._get_state(grorders_mos_id)
+            documents = active_documents(recovered, document_type)
+            matching = [
+                item
+                for item in documents
+                if document_id(item, document_type) == document_id_value
+            ]
+            if matching and int(matching[0].get("isapproved", 0) or 0) == 1:
+                _emit(
+                    progress,
+                    f"recovered=approve_{document_type} id={document_id_value} after_error={error}",
+                )
+                return
+            raise WorkflowError(
+                f"Ошибка проводки {document_type} ID={document_id_value}: {error}",
+                "warehouse/resume",
+            ) from error
+
+    def _complete_existing_pair(
+        self,
+        grorders_mos_id: int,
+        state: dict,
+        progress: Optional[ProgressFn],
+        *,
+        mode: str,
+        input_data: Optional[OptimizationInput] = None,
+        cell_map: Optional[Dict[str, int]] = None,
+        linear_result: Optional[Any] = None,
+        fiberglass_result: Optional[Any] = None,
+        upload_response: Optional[dict] = None,
+        materials_response: Optional[dict] = None,
+        initial_state: Optional[dict] = None,
+    ) -> WorkflowRun:
+        """Finish cells and approvals without recalculation or warehouse INSERT."""
+        current_state = state
+        current_input = input_data
+        current_cell_map = cell_map or {}
+        skipped_steps: List[str] = []
+        if mode == "resume":
+            skipped_steps.extend(["upload_mos_data", "adjust_materials_altawin"])
+            _emit(progress, "skip=upload_mos_data reason=existing_warehouse_pair")
+            _emit(
+                progress,
+                "skip=adjust_materials_altawin reason=existing_warehouse_pair",
+            )
+
+        if int(current_state.get("missing_cell_count", 0) or 0) > 0:
+            if not self.settings.distribute_cells:
+                raise WorkflowError(
+                    "Нельзя завершить RESUME: CELL_NUMBER не заполнены, "
+                    "а distribute_cells отключён",
+                    "warehouse/resume",
+                )
+            if current_input is None:
+                current_input = load_cell_map_input(
+                    self.api_client, grorders_mos_id, progress
+                )
+            if not current_cell_map:
+                current_cell_map = generate_cell_map(
+                    current_input.profiles,
+                    current_input.fabric_details,
+                )
+            if not current_cell_map:
+                raise WorkflowError(
+                    "Не удалось построить детерминированную карту CELL_NUMBER",
+                    "warehouse/resume",
+                )
+            try:
+                _emit(progress, "RESUME: распределение отсутствующих CELL_NUMBER")
+                cells_response = self.api_client.distribute_cell_numbers(
+                    grorders_mos_id,
+                    cell_map=current_cell_map,
+                )
+                if not cells_response.get("success"):
+                    raise RuntimeError(cells_response)
+            except Exception as error:
+                recovered = self._get_state(grorders_mos_id)
+                if int(recovered.get("missing_cell_count", 0) or 0) != 0:
+                    raise WorkflowError(
+                        f"Ошибка распределения CELL_NUMBER при RESUME: {error}",
+                        "warehouse/resume",
+                    ) from error
+                _emit(progress, f"recovered=distribute_cell_numbers after_error={error}")
+                cells_response = {
+                    "success": True,
+                    "recovered_after_transport_error": True,
+                }
+            current_state = self._get_state(grorders_mos_id)
+        else:
+            skipped_steps.append("distribute_cell_numbers")
+            _emit(
+                progress,
+                "skip=distribute_cell_numbers reason=all_cells_already_assigned",
+            )
+            cells_response = {"success": True, "skipped": True}
+
+        consistent_mode = self._require_consistent_state(current_state, progress)
+        if consistent_mode not in {"resume", "noop"}:
+            raise WorkflowError(
+                f"Складская пара исчезла во время RESUME: mode={consistent_mode}",
+                "warehouse/resume",
+            )
+        remaining_cells = int(current_state.get("missing_cell_count", 0) or 0)
+        if remaining_cells:
+            raise WorkflowError(
+                "RESUME не заполнил все CELL_NUMBER; "
+                f"осталось деталей без ячейки: {remaining_cells}",
+                "warehouse/resume",
+            )
+        outlay = active_documents(current_state, "outlay")[0]
+        supply = active_documents(current_state, "supply")[0]
+        self._approve_document(grorders_mos_id, "outlay", outlay, progress)
+        current_state = self._get_state(grorders_mos_id)
+        supply_matches = [
+            item
+            for item in active_documents(current_state, "supply")
+            if document_id(item, "supply") == document_id(supply, "supply")
+        ]
+        if not supply_matches:
+            raise WorkflowError(
+                f"SUPPLYID={document_id(supply, 'supply')} исчез во время RESUME",
+                "warehouse/resume",
+            )
+        self._approve_document(
+            grorders_mos_id,
+            "supply",
+            supply_matches[0],
+            progress,
+        )
+
+        final_state = self._get_state(grorders_mos_id)
+        final_mode = self._require_consistent_state(final_state, progress)
+        if final_mode != "noop":
+            raise WorkflowError(
+                "Итоговая проверка не подтверждает COMPLETED: "
+                f"mode={final_mode}, missing_cells={final_state.get('missing_cell_count')}",
+                "warehouse/resume",
+            )
+        if current_input is None:
+            current_input = empty_optimization_input(grorders_mos_id)
+        response = materials_response or self._warehouse_response_from_state(final_state)
+        response.setdefault("reused", mode == "resume")
+        return WorkflowRun(
+            input_data=current_input,
+            linear_result=linear_result,
+            fiberglass_result=fiberglass_result,
+            cell_map=current_cell_map,
+            upload_response=upload_response
+            or {"success": True, "skipped": mode == "resume"},
+            materials_response=response,
+            cells_response=cells_response,
+            mode=mode,
+            initial_state=initial_state or state,
+            final_state=final_state,
+            skipped_steps=skipped_steps,
+        )
+
     def run(
         self,
         grorders_mos_id: int,
@@ -448,6 +838,47 @@ class MosOptimizationWorkflow:
         dry_run: bool = False,
         progress: Optional[ProgressFn] = None,
     ) -> WorkflowRun:
+        initial_state = self._get_state(
+            grorders_mos_id,
+            stage="loading",
+        )
+        initial_mode = self._require_consistent_state(initial_state, progress)
+        if not dry_run and self.settings.save_result:
+            if initial_mode == "noop":
+                _emit(progress, "mode=noop: задание уже полностью завершено")
+                warehouse = self._warehouse_response_from_state(initial_state)
+                noop_skips = [
+                    "optimization",
+                    "upload_mos_data",
+                    "adjust_materials_altawin",
+                    "distribute_cell_numbers",
+                    "approve_outlay",
+                    "approve_supply",
+                ]
+                for step in noop_skips:
+                    _emit(progress, f"skip={step} reason=already_completed")
+                return WorkflowRun(
+                    input_data=empty_optimization_input(grorders_mos_id),
+                    linear_result=None,
+                    fiberglass_result=None,
+                    cell_map={},
+                    upload_response={"success": True, "skipped": True},
+                    materials_response=warehouse,
+                    cells_response={"success": True, "skipped": True},
+                    mode="noop",
+                    initial_state=initial_state,
+                    final_state=initial_state,
+                    skipped_steps=noop_skips,
+                )
+            if initial_mode == "resume":
+                return self._complete_existing_pair(
+                    grorders_mos_id,
+                    initial_state,
+                    progress,
+                    mode="resume",
+                    initial_state=initial_state,
+                )
+
         input_data = load_optimization_input(self.api_client, grorders_mos_id, progress)
         for warning in input_data.warnings:
             _emit(progress, f"ПРЕДУПРЕЖДЕНИЕ: {warning}")
@@ -507,13 +938,15 @@ class MosOptimizationWorkflow:
             fiberglass_result=fiberglass_result,
             cell_map=cell_map,
             dry_run=dry_run,
+            mode="fresh",
+            initial_state=initial_state,
         )
         if dry_run or not self.settings.save_result:
             _emit(progress, "Расчёт завершён без записи в базу")
             return run
 
         try:
-            _emit(progress, "Запись карт раскроя")
+            _emit(progress, "step=upload_mos_data action=write_cut_maps")
             if not self.api_client.upload_mos_data(
                 grorders_mos_id=grorders_mos_id,
                 result=linear_result,
@@ -529,11 +962,63 @@ class MosOptimizationWorkflow:
         except WorkflowError:
             raise
         except Exception as error:
-            raise WorkflowError(f"Не удалось записать карты раскроя: {error}", "saving") from error
+            recovered = self._get_state(grorders_mos_id)
+            expected_maps = sum(
+                1 for plan in linear_result.cut_plans if getattr(plan, "cuts", None)
+            )
+            expected_details = sum(
+                1
+                for plan in linear_result.cut_plans
+                for cut in (getattr(plan, "cuts", None) or [])
+                if int(cut.get("quantity", 0) or 0) > 0
+                and float(cut.get("length", 0) or 0) > 0
+            )
+            if (
+                int(recovered.get("optimized_count", 0) or 0) == expected_maps
+                and int(recovered.get("detail_count", 0) or 0) == expected_details
+            ):
+                _emit(progress, f"recovered=upload_mos_data after_error={error}")
+                run.upload_response = {
+                    "success": True,
+                    "recovered_after_transport_error": True,
+                }
+            else:
+                raise WorkflowError(
+                    "Неопределённый результат upload_mos_data; повторная запись запрещена: "
+                    f"expected_maps={expected_maps}, actual_maps={recovered.get('optimized_count')}, "
+                    f"expected_details={expected_details}, actual_details={recovered.get('detail_count')}, "
+                    f"error={error}",
+                    "saving",
+                ) from error
+
+        persisted_state = self._get_state(grorders_mos_id)
+        expected_maps = sum(
+            1 for plan in linear_result.cut_plans if getattr(plan, "cuts", None)
+        )
+        expected_details = sum(
+            1
+            for plan in linear_result.cut_plans
+            for cut in (getattr(plan, "cuts", None) or [])
+            if int(cut.get("quantity", 0) or 0) > 0
+            and float(cut.get("length", 0) or 0) > 0
+        )
+        if (
+            int(persisted_state.get("optimized_count", 0) or 0) != expected_maps
+            or int(persisted_state.get("detail_count", 0) or 0) != expected_details
+        ):
+            raise WorkflowError(
+                "Проверка записи карт не пройдена: "
+                f"expected_maps={expected_maps}, actual_maps={persisted_state.get('optimized_count')}, "
+                f"expected_details={expected_details}, actual_details={persisted_state.get('detail_count')}",
+                "saving",
+            )
 
         if self.settings.adjust_materials:
             try:
-                _emit(progress, "Создание складских документов")
+                _emit(
+                    progress,
+                    "step=adjust_materials_altawin action=create_or_reuse_pair",
+                )
                 payloads = collect_material_adjustments(
                     linear_result, input_data.profiles, fiberglass_result
                 )
@@ -543,30 +1028,61 @@ class MosOptimizationWorkflow:
                 if not run.materials_response.get("success"):
                     raise WorkflowError(
                         f"Не удалось скорректировать материалы: {run.materials_response}",
-                        "warehouse",
+                        "warehouse/resume",
                     )
             except WorkflowError:
                 raise
             except Exception as error:
-                raise WorkflowError(f"Не удалось создать складские документы: {error}", "warehouse") from error
-
-        if self.settings.distribute_cells and cell_map:
-            try:
-                _emit(progress, "Распределение номеров ячеек")
-                run.cells_response = self.api_client.distribute_cell_numbers(
-                    grorders_mos_id, cell_map=cell_map
-                )
-                if not run.cells_response.get("success"):
+                recovered = self._get_state(grorders_mos_id)
+                recovered_mode = self._require_consistent_state(recovered, progress)
+                if recovered_mode not in {"resume", "noop"}:
                     raise WorkflowError(
-                        f"Не удалось распределить ячейки: {run.cells_response}",
-                        "cells",
-                    )
-            except WorkflowError:
-                raise
-            except Exception as error:
-                raise WorkflowError(f"Ошибка распределения ячеек: {error}", "cells") from error
+                        "Неопределённый результат adjust_materials_altawin; "
+                        "повторный INSERT запрещён: "
+                        f"mode={recovered_mode}, error={error}",
+                        "warehouse/resume",
+                    ) from error
+                _emit(
+                    progress,
+                    f"recovered=adjust_materials_altawin mode={recovered_mode} after_error={error}",
+                )
+                run.materials_response = self._warehouse_response_from_state(recovered)
 
-        _emit(progress, "Workflow завершён")
+            warehouse_state = self._get_state(grorders_mos_id)
+            warehouse_mode = self._require_consistent_state(warehouse_state, progress)
+            if warehouse_mode not in {"resume", "noop"}:
+                raise WorkflowError(
+                    "API не создал распознаваемую складскую пару: "
+                    f"mode={warehouse_mode}, response={run.materials_response}",
+                    "warehouse/resume",
+                )
+            return self._complete_existing_pair(
+                grorders_mos_id,
+                warehouse_state,
+                progress,
+                mode="fresh",
+                input_data=input_data,
+                cell_map=cell_map,
+                linear_result=linear_result,
+                fiberglass_result=fiberglass_result,
+                upload_response=run.upload_response,
+                materials_response=run.materials_response,
+                initial_state=initial_state,
+            )
+
+        # This legacy opt-out deliberately does not create or approve documents.
+        if self.settings.distribute_cells and cell_map:
+            _emit(progress, "Распределение номеров ячеек")
+            run.cells_response = self.api_client.distribute_cell_numbers(
+                grorders_mos_id, cell_map=cell_map
+            )
+            if not run.cells_response.get("success"):
+                raise WorkflowError(
+                    f"Не удалось распределить ячейки: {run.cells_response}",
+                    "cells",
+                )
+        run.final_state = self._get_state(grorders_mos_id)
+        _emit(progress, "Workflow завершён без складских документов по настройке")
         return run
 
 
@@ -576,9 +1092,11 @@ def build_summary(run: WorkflowRun) -> Dict[str, Any]:
     stats = getattr(linear, "statistics", {}) or {}
     fiberglass = run.fiberglass_result
     warehouse = run.materials_response if isinstance(run.materials_response, dict) else {}
+    final_state = run.final_state or run.initial_state or {}
     return {
         "success": True,
         "stage": "completed",
+        "mode": run.mode,
         "grorders_mos_id": run.input_data.grorders_mos_id,
         "grorder_ids": run.input_data.grorder_ids,
         "dry_run": run.dry_run,
@@ -594,9 +1112,11 @@ def build_summary(run: WorkflowRun) -> Dict[str, Any]:
             ),
         },
         "linear": {
-            "plans": len(linear.cut_plans),
-            "total_waste": linear.total_waste,
-            "total_waste_percent": linear.total_waste_percent,
+            "plans": len(getattr(linear, "cut_plans", []) or [])
+            if linear is not None
+            else int(final_state.get("optimized_count", 0) or 0),
+            "total_waste": getattr(linear, "total_waste", None),
+            "total_waste_percent": getattr(linear, "total_waste_percent", None),
             "total_pieces_needed": stats.get("total_pieces_needed", 0),
             "total_pieces_placed": stats.get("total_pieces_placed", 0),
             "total_pieces_unplaced": stats.get("total_pieces_unplaced", 0),
@@ -616,4 +1136,9 @@ def build_summary(run: WorkflowRun) -> Dict[str, Any]:
             "supply_id": warehouse.get("supply_id"),
         },
         "cell_numbers": run.cells_response,
+        "state": {
+            "initial": run.initial_state,
+            "final": run.final_state,
+        },
+        "skipped_steps": run.skipped_steps,
     }
